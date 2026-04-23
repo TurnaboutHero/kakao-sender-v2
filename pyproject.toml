@@ -1,0 +1,80 @@
+[project]
+name = "kakao-sender"
+version = "0.1.0"
+description = "카카오톡 PC 자동 개인톡 발송기 (UIA 기반 리팩토링판)"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "TurnaboutHero" }]
+
+dependencies = [
+    "pywin32>=308",
+    "pyautogui>=0.9.54",
+    "pyperclip>=1.9.0",
+    "Pillow>=11.0.0",
+    "uiautomation>=2.0.20",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.11"]
+
+[project.scripts]
+kakao-sender = "kakao_sender.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["kakao_sender"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["build", "dist", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",   # line too long — 포맷터에 위임
+    "RUF001", # 한글 주석과 유니코드 문자 경고 (한국어 프로젝트라 무시)
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+
+[tool.coverage.run]
+source = ["kakao_sender"]
+omit = [
+    "kakao_sender/app.py",         # Tk UI는 수동 테스트 영역
+    "kakao_sender/engine/*",        # 실제 카톡 창 필요한 통합 테스트 영역
+    "kakao_sender/__main__.py",
+]

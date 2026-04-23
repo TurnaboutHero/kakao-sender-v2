@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+*.egg
+
+# PyInstaller
+*.spec.bak
+build/
+dist/
+
+# Environment
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code 런타임 상태 (오케스트레이션 캐시)
+.omc/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project data (사용자 개인정보/런타임 상태는 커밋 금지)
+data/
+logs/
+*.log
+members.json
+members.csv
+mapping.json
+mapping.*.json
