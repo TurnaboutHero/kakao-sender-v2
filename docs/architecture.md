@@ -33,9 +33,20 @@
 
 ## 핵심 결정
 
-### D1. 상태 감지는 UIA 우선, 시간 기반 fallback
+### D1. 상태 감지는 win32 HWND + 핫키 중심, UIA는 창 탐지만 (수정됨)
 
-픽셀 감지는 완전 폐기. `uiautomation` 라이브러리로 `WindowControl`, `ButtonControl`, `EditControl` 을 찾아 조작한다. 노출되지 않는 영역(메시지 영역, 업로드 완료)은 시간 기반 대기로 보완. Phase 2 조사 결과에 따라 UIA 적용 범위를 점진 확대.
+**원래 의도**: `uiautomation` 으로 버튼·입력창·리스트를 의미 기반 조작.
+
+**실측 결론** (`docs/investigation.md`): **카톡 PC 는 UIA 에 의미 있는 컨트롤을 거의 노출하지 않는다.** 메인 창 하위는 전부 빈 `PaneControl` 또는 내부 해시 ID. 탭 버튼·친구 목록·검색창·입력창 모두 UIA 로 안 잡힘.
+
+**현실 전략**:
+- UIA 는 **최상위 `WindowControl` 탐지** 와 **HWND 획득** 에만 씀
+- 사이드바 탭 전환: **단축키 `Ctrl+1/2`** (UIA 경로는 방어적으로 유지, 실제로는 fallback 에 떨어짐)
+- 검색·전송·닫기: 원본과 동일한 **클립보드 + 핫키**
+- 오발송 검증: `win32gui.GetForegroundWindow()` + `GetWindowText()` (UIA 대신)
+- 이미지 업로드 완료: 파일 크기 비례 고정 대기
+
+픽셀 감지는 여전히 폐기. 원본의 최대 결함(픽셀 한 점)은 제거됐지만, UIA 로 얻을 수 있다고 기대했던 "의미 기반 검증"은 `GetWindowText` 한 축으로 축소된다.
 
 ### D2. 대상 검증 계층 분리
 

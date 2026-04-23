@@ -73,6 +73,17 @@ docs/                     설계·분석 문서
 
 원본 `kakao_sender/kakao_sender.py` 디렉토리는 **보존**. 이 저장소는 완전히 별도 경로·별도 repo. 참조는 하지만 수정하지 않는다.
 
+## 주요 문서
+
+- [`docs/USER_MANUAL.md`](docs/USER_MANUAL.md) — 담당자용 사용 설명서
+- [`docs/original-analysis.md`](docs/original-analysis.md) — 원본 코드 진단 (이미지 잘림 원인 등)
+- [`docs/architecture.md`](docs/architecture.md) — 설계 결정 D1~D7
+- [`docs/investigation.md`](docs/investigation.md) — Phase 2 UIA 실측 결과
+
+## Phase 2 실측 요약
+
+2026-04-23 조사 결과 **카카오톡 PC 는 UIA 에 의미 있는 컨트롤을 거의 노출하지 않는다.** 탭 버튼·검색창·친구 목록 모두 자체 렌더링. 그래서 설계 결정 D1 이 "UIA 우선" → **"win32 HWND + 핫키 중심, UIA 는 창 탐지만"** 으로 조정됨. 상세 내역은 `docs/investigation.md`.
+
 ## 라이선스
 
 사적 사용. 외부 배포 시 별도 협의.

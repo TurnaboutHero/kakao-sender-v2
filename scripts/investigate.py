@@ -50,6 +50,14 @@ def dump_tree(
 
 
 def main() -> int:
+    # Windows 기본 cp949 출력으로 한글 깨짐 방지
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+            sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="카톡 UIA 트리 조사")
     parser.add_argument("--depth", type=int, default=3, help="트리 깊이 (기본 3)")
     parser.add_argument(
