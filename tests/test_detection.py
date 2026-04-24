@@ -20,19 +20,26 @@ def test_verify_exact_match() -> None:
     assert m.expected == "회원나"
 
 
-def test_verify_name_with_suffix() -> None:
-    # 카톡이 제목에 " - 카카오톡" 같은 접미를 붙이는 경우도 OK
+def test_verify_partial_match_rejected() -> None:
+    """Phase 3: 부분일치는 단톡방 오발송 위험 — 실패해야 함.
+
+    예: 단톡방 이름 "회원나 팬클럽" 이 회원명 "회원나" 를 포함.
+    완전일치만 통과시켜 오발송을 구조적으로 차단.
+    """
     m = verify_target_title("회원나 - 카카오톡", "회원나")
-    assert m.ok
+    assert not m.ok
 
     m2 = verify_target_title("회원나 (2)", "회원나")
-    assert m2.ok
+    assert not m2.ok
+
+    m3 = verify_target_title("회원나 팬클럽", "회원나")
+    assert not m3.ok
 
 
 def test_verify_wrong_person_fails() -> None:
     m = verify_target_title("회원다", "회원나")
     assert not m.ok
-    assert "기대 이름 없음" in m.reason
+    assert "제목 불일치" in m.reason
 
 
 def test_verify_empty_actual_or_expected() -> None:

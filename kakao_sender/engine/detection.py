@@ -30,12 +30,14 @@ class TargetMatch:
 
 
 def verify_target_title(actual_title: str, expected_name: str) -> TargetMatch:
-    """열린 채팅창 제목이 기대한 상대와 일치하는지.
+    """열린 채팅창 제목이 기대한 상대와 **완전일치** 하는지.
 
-    카톡 1:1 채팅창 제목은 보통 상대 이름으로 시작하고 뒤에 부가 정보가 붙거나
-    창 여러 개 열려있으면 숫자 접미사가 붙기도 한다.
-    동명이인 구분 책임은 `select_friend_in_results`에 있고,
-    여기서는 "채팅창이 아예 다른 사람/단톡으로 열렸다"를 걸러낸다.
+    Phase 3 실측 결과 (docs/investigation.md):
+    - 카톡은 1:1 채팅창 제목에 접미사를 붙이지 않음. 상대 이름 그대로.
+    - 단톡방과 1:1 채팅창은 클래스·자식 구조가 동일해 제목만으로 구분 불가.
+    - 따라서 부분일치는 위험: 단톡방 이름이 회원 이름을 포함할 수 있다 (예: "회원나 팬클럽").
+
+    strip() 후 정확히 같아야 성공. 그 외 모두 실패.
     """
     actual = (actual_title or "").strip()
     expected = (expected_name or "").strip()
@@ -45,13 +47,10 @@ def verify_target_title(actual_title: str, expected_name: str) -> TargetMatch:
     if not expected:
         return TargetMatch(False, actual, expected, "기대 이름이 비어있음")
 
-    # 완전 포함 매칭: 상대 이름이 창 제목 안에 포함되면 OK
-    # (제목이 "회원나 - 카카오톡", "회원나 (2)" 같은 변형을 수용)
-    if expected in actual:
+    if actual == expected:
         return TargetMatch(True, actual, expected)
 
-    # 여기서 실패하면 단톡/다른 사람일 가능성 — 안전하게 실패 처리
-    return TargetMatch(False, actual, expected, "제목에 기대 이름 없음")
+    return TargetMatch(False, actual, expected, f"제목 불일치 (기대={expected!r})")
 
 
 def estimate_image_upload_wait(image_path: Path | str) -> float:
