@@ -164,7 +164,7 @@ def send_batch(
             if on_result:
                 on_result(results[-1])
         return results
-    client.open_search()
+    # open_search 는 search() 가 내부에서 매번 Ctrl+F 를 호출하므로 별도 선행 불필요
 
     try:
         for idx, job in enumerate(jobs, 1):

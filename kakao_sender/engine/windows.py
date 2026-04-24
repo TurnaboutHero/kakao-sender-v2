@@ -257,6 +257,28 @@ def get_active_main_tab(main_hwnd: int) -> MainTab:
     return classify_active_main_tab(_list_children_with_meta(main_hwnd))
 
 
+def find_friend_tab_search_edit(main_hwnd: int) -> int | None:
+    """친구 탭의 검색 Edit HWND 찾기.
+
+    메인 창 자식 중 title 이 `view_prefix_friends` 로 시작하고 visible 인 View 를 찾고,
+    그 아래 첫 번째 `Edit` 클래스 자식 HWND 를 반환. 친구 탭이 비활성이면 None.
+    """
+    # ContactListView_* (visible)
+    contact_view: int | None = None
+    for hwnd, _cls, title, _rect, visible in _list_children_with_meta(main_hwnd):
+        if visible and title.startswith(config.UIA_NAMES.view_prefix_friends):
+            contact_view = hwnd
+            break
+    if contact_view is None:
+        return None
+
+    # 그 안의 Edit (첫 번째)
+    for hwnd, cls, _rect in _list_children(contact_view):
+        if cls == config.HWND_CLASSES.edit_standard:
+            return hwnd
+    return None
+
+
 def post_close(hwnd: int) -> None:
     """특정 HWND 에 WM_CLOSE 전송 (포그라운드 무관)."""
     try:
