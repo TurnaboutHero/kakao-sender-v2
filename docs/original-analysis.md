@@ -39,7 +39,7 @@ pyautogui.hotkey("alt", "enter")  # 1:1 채팅 열기
 - 원저자 지침 "대화창이 아닌 **친구창**에서 해야 함" — 사용 전제가 있는데 프로그램이 검증하지 않음
 - 한 명이라도 엉뚱한 대화방에 축하 메시지가 가면 **생일자 본인에게 유출**되는 재앙
 
-**v2 대응**: 채팅창이 열린 후 창 제목(`win32gui.GetWindowText` 또는 UIA `Name`)과 타겟 이름을 비교. 불일치 시 즉시 `close_active_chat()` + 실패 기록. 친구 탭 강제 전환 (`switch_to_tab("친구")`).
+**v2 대응** (Phase 3): 3중 방어. 친구 탭 강제 전환 (`switch_to_friend_tab()` + rect 검증) + HWND 스냅샷 diff 로 새 채팅창 특정 + 창 제목 완전일치 검증. 불일치 시 그 HWND 에만 `PostMessage(WM_CLOSE)` 전송 후 실패 기록. 단톡방이 결과에 섞여도 완전일치 검증에서 걸림.
 
 ### 3. 명단 경직
 

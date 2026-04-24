@@ -80,9 +80,12 @@ docs/                     설계·분석 문서
 - [`docs/architecture.md`](docs/architecture.md) — 설계 결정 D1~D7
 - [`docs/investigation.md`](docs/investigation.md) — Phase 2 UIA 실측 결과
 
-## Phase 2 실측 요약
+## 실측 요약 (Phase 2 + Phase 3)
 
-2026-04-23 조사 결과 **카카오톡 PC 는 UIA 에 의미 있는 컨트롤을 거의 노출하지 않는다.** 탭 버튼·검색창·친구 목록 모두 자체 렌더링. 그래서 설계 결정 D1 이 "UIA 우선" → **"win32 HWND + 핫키 중심, UIA 는 창 탐지만"** 으로 조정됨. 상세 내역은 `docs/investigation.md`.
+- **Phase 2 (2026-04-23)**: 카톡 메인 창 UIA 가 빈 `PaneControl` 중첩뿐. 탭 버튼·검색창·친구 목록 모두 자체 렌더링.
+- **Phase 3 (2026-04-24)**: win32 `EnumChildWindows` 경로 추가 조사. **채팅창 (1:1 / 단톡방) 은 별도 top-level HWND** 이며 내부에 표준 `RICHEDIT50W` 입력창과 메시지 `ListControl` 을 노출. 메인 창도 `ContactListView_*` / `ChatRoomListView_*` 등 자식 HWND 이름 + rect 로 활성 탭 판정 가능. 단톡방 참여자 패널도 별도 HWND (검색 `Edit` + 리스트).
+
+**결과**: D1 이 "UIA 우선" → "win32 HWND + 핫키" (Phase 2) → **"win32 HWND + `EnumChildWindows` 주력, UIA 는 보조"** (Phase 3) 로 갱신. 오발송 방지는 **3중 방어** (친구 탭 강제 + HWND 스냅샷 diff + 제목 완전일치) 로 강화. 텍스트 전송은 `SendMessage(WM_SETTEXT)` 로 클립보드·포커스 독립. 상세 내역은 [`docs/investigation.md`](docs/investigation.md).
 
 ## 라이선스
 
