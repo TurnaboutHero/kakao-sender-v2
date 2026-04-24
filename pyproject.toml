@@ -1,7 +1,7 @@
 [project]
 name = "kakao-sender"
 version = "0.1.0"
-description = "카카오톡 PC 자동 개인톡 발송기 (UIA 기반 리팩토링판)"
+description = "카카오톡 PC 자동 개인톡 발송기 (win32 HWND + UIA 보조 리팩토링판)"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "Proprietary" }
@@ -10,7 +10,6 @@ authors = [{ name = "TurnaboutHero" }]
 dependencies = [
     "pywin32>=308",
     "pyautogui>=0.9.54",
-    "pyperclip>=1.9.0",
     "Pillow>=11.0.0",
     "uiautomation>=2.0.20",
 ]
