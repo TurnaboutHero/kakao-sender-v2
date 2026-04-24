@@ -52,6 +52,11 @@ class Timing:
     wait_image_per_mb: float = 2.5  # 1MB 당 대기
     wait_search_result_timeout: float = 1.5
 
+    # Phase 3 신설 — HWND 스냅샷 diff / 탭 전환 검증
+    wait_new_chat_window: float = 2.0
+    wait_tab_switch: float = 1.0
+    poll_interval: float = 0.05
+
     # 배치 템포 (스팸 회피)
     between_send_min: float = 5.0
     between_send_max: float = 8.0
@@ -60,17 +65,37 @@ class Timing:
 
 
 @dataclass(frozen=True, slots=True)
+class HwndClasses:
+    """win32 클래스명 — Phase 3 실측 (docs/investigation.md).
+
+    카톡 top-level 창은 모두 같은 클래스 `EVA_Window_Dblclk` 를 쓰므로
+    제목 + 자식 HWND 패턴으로 역할을 구분한다.
+    """
+
+    chat_window: str = "EVA_Window_Dblclk"
+    richedit: str = "RICHEDIT50W"
+    list_control: str = "EVA_VH_ListControl_Dblclk"
+    edit_standard: str = "Edit"
+
+
+@dataclass(frozen=True, slots=True)
 class UIANames:
     """카톡 창에서 찾을 컨트롤 이름·속성.
 
-    Phase 2 실측(`scripts/investigate.py`) 결과에 따라 조정될 값들.
-    현재 값은 경험·문헌 기반 추정.
+    Phase 2/3 실측(`scripts/investigate.py`) 결과 반영.
     """
 
     window_title: str = "카카오톡"
     friends_tab_name: str = "친구"
     chats_tab_name: str = "채팅"
     search_edit_placeholders: tuple[str, ...] = ("검색", "이름, 전화번호", "친구 검색")
+
+    # 메인 창 내부 뷰 이름 prefix (win32 GetWindowText startswith 매칭용).
+    # 활성 여부는 GetWindowRect 의 너비·높이가 0 이 아닌지로 판정한다.
+    view_prefix_friends: str = "ContactListView"
+    view_prefix_chats: str = "ChatRoomListView"
+    view_prefix_more: str = "MoreView"
+    view_prefix_lock: str = "LockModeView"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +112,7 @@ class MessageVariants:
 
 TIMING = Timing()
 UIA_NAMES = UIANames()
+HWND_CLASSES = HwndClasses()
 MESSAGES = MessageVariants()
 
 
