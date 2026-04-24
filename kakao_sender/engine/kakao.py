@@ -1,12 +1,14 @@
-"""카카오톡 PC 창을 조작하는 저수준 primitive.
+"""카카오톡 PC 창을 조작하는 저수준 primitive (Phase 3 기반).
 
 설계 원칙:
-- UIA가 노출하는 컨트롤은 UIA로 (검증 가능, 다크모드/DPI 무관)
-- 텍스트·이미지 전송은 클립보드 + 단축키 (카톡 내부 입력 위젯이 UIA SetValue를 무시하는 경우 많음)
-- 이미지 업로드 완료는 시간 기반 추정 (Phase 2에서 UIA로 개선 여지)
+- win32 `EnumWindows` / `EnumChildWindows` 주력. UIA 거의 안 씀.
+- 채팅창은 **HWND 스냅샷 diff** 로 추적. `GetForegroundWindow` 의존 제거.
+- 텍스트는 `SendMessage(WM_SETTEXT)` + `PostMessage(WM_KEYDOWN, VK_RETURN)` 로 RichEdit 에 직접 주입. 클립보드·pyautogui 불필요.
+- 이미지는 클립보드 DIB 경로 유지 (포맷 복잡도). `SetFocus(richedit_hwnd)` 로 수신 창 명시.
+- 탭 전환은 `Ctrl+1/2` 핫키 + `get_active_main_tab` rect 검증.
+- 채팅창 닫기는 `PostMessage(chat_hwnd, WM_CLOSE)` — 포그라운드 의존 없음.
 
-각 primitive는 "성공 시 None, 실패 시 RuntimeError" 계약.
-상태 검증은 `detection.py`의 순수 함수에 위임.
+각 primitive 는 "성공 시 None, 실패 시 KakaoError" 계약.
 """
 
 from __future__ import annotations
@@ -17,20 +19,19 @@ from pathlib import Path
 from typing import Literal
 
 import pyautogui
-import pyperclip
-import uiautomation as auto
+import win32api
 import win32clipboard
 import win32con
 import win32gui
 from PIL import Image
 
 from kakao_sender import config, logging_setup
-from kakao_sender.engine import detection
+from kakao_sender.engine import detection, windows
 
 _log = logging_setup.get_logger(__name__)
 
-# pyautogui가 스크린 구석으로 마우스를 밀면 FailSafe 예외를 던짐 — 배치 발송 도중 중단 원인이 됨.
-# 중단은 stop_flag / ESC 로 제어하므로 이 자동 feature는 꺼둔다.
+# pyautogui FailSafe 는 마우스가 구석으로 갈 때 중단시켜 배치 중 끊김 원인이 됨.
+# 중단은 stop_flag / ESC 로 제어.
 pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.02
 
@@ -47,17 +48,24 @@ class KakaoFocusError(KakaoError):
     pass
 
 
-class KakaoClient:
-    """카카오톡 창 하나에 대한 조작 세션.
+class KakaoTabError(KakaoError):
+    pass
 
-    라이프사이클: `attach()` → (여러 작업) → `detach()`.
-    `with KakaoClient() as kk:` 패턴 지원.
+
+class KakaoTargetMismatchError(KakaoError):
+    """채팅창이 열렸으나 제목이 기대와 다름 (단톡방 오발송 방지용)."""
+
+
+class KakaoClient:
+    """카카오톡 세션. `attach()` → 여러 작업 → `detach()`.
+
+    with 문 지원.
     """
 
     def __init__(self, *, window_title: str | None = None) -> None:
         self.window_title: str = window_title or config.UIA_NAMES.window_title
-        self._hwnd: int | None = None
-        self._window: auto.WindowControl | None = None
+        self._main_hwnd: int | None = None
+        self._current_chat: windows.ChatWindow | None = None
 
     # ── 라이프사이클 ──────────────────────────────
 
@@ -69,167 +77,249 @@ class KakaoClient:
         self.detach()
 
     def attach(self) -> None:
-        hwnd = win32gui.FindWindow(None, self.window_title)
+        hwnd = windows.find_main_window()
         if not hwnd:
-            raise KakaoNotFoundError(f"창을 찾을 수 없음: {self.window_title!r}")
-        self._hwnd = hwnd
-        # UIA 창 참조: 검색 깊이 1~2로 제한해 속도 확보
-        self._window = auto.WindowControl(
-            searchFromControl=auto.GetRootControl(),
-            Name=self.window_title,
-            searchDepth=2,
-        )
-        if not self._window.Exists(maxSearchSeconds=2.0):
-            _log.warning("UIA로 창을 못 찾음 — win32 핸들만 사용")
-            self._window = None
-        _log.debug("attach 완료: hwnd=%s, uia=%s", hex(hwnd), bool(self._window))
+            raise KakaoNotFoundError(f"카톡 메인 창을 찾을 수 없음: {self.window_title!r}")
+        self._main_hwnd = hwnd
+        _log.debug("attach 완료: main_hwnd=%s", hex(hwnd))
 
     def detach(self) -> None:
-        self._hwnd = None
-        self._window = None
-
-    # ── 창 조작 ───────────────────────────────────
+        self._main_hwnd = None
+        self._current_chat = None
 
     @property
-    def hwnd(self) -> int:
-        if self._hwnd is None:
+    def main_hwnd(self) -> int:
+        if self._main_hwnd is None:
             raise KakaoError("attach() 호출 전")
-        return self._hwnd
+        return self._main_hwnd
 
-    def focus(self) -> None:
-        """창을 포그라운드로. 최소화면 복원."""
-        hwnd = self.hwnd
+    # ── 창 포커스 ─────────────────────────────────
+
+    def focus_main(self) -> None:
+        """메인 창을 포그라운드로. 최소화면 복원."""
+        hwnd = self.main_hwnd
         if win32gui.IsIconic(hwnd):
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         try:
             win32gui.SetForegroundWindow(hwnd)
         except Exception as e:
-            raise KakaoFocusError(f"포커스 실패: {e}") from e
+            raise KakaoFocusError(f"메인 창 포커스 실패: {e}") from e
         time.sleep(config.TIMING.focus_settle)
 
     # ── 사이드바 탭 전환 ─────────────────────────
 
-    def switch_to_tab(self, tab: Literal["친구", "채팅"]) -> None:
-        """좌측 사이드바에서 지정 탭 클릭.
+    def switch_to_friend_tab(self) -> None:
+        """친구 탭으로 전환 + rect 로 성공 검증.
 
-        UIA가 탭 버튼을 노출하면 이름으로 클릭, 실패하면 단축키 fallback.
-        카톡 PC 단축키 (2025~2026 기준): Ctrl+1=친구, Ctrl+2=채팅 (버전별 실측 필요).
+        Phase 3 오발송 방지 1차 방어선. 채팅 탭에서 검색하면 단톡방이 결과에
+        섞여 나오므로 친구 탭 고정 필수. 전환 실패를 감지해 즉시 예외를 던진다.
         """
-        if self._window is not None:
-            try:
-                btn = self._window.ButtonControl(Name=tab, searchDepth=8)
-                if btn.Exists(maxSearchSeconds=1.0):
-                    btn.Click(simulateMove=False)
-                    time.sleep(config.TIMING.after_enter)
-                    _log.debug("UIA 탭 클릭 성공: %s", tab)
-                    return
-            except Exception as e:
-                _log.debug("UIA 탭 클릭 실패 (fallback 진행): %s", e)
+        self._switch_tab("친구", hotkey="1")
 
-        # Fallback: 단축키 (카톡 버전에 따라 안 먹힐 수 있음)
-        self.focus()
-        shortcut = {"친구": "1", "채팅": "2"}[tab]
-        pyautogui.hotkey("ctrl", shortcut)
-        time.sleep(config.TIMING.after_enter)
-        _log.debug("단축키 탭 전환 시도: Ctrl+%s", shortcut)
+    def switch_to_chats_tab(self) -> None:
+        """채팅 탭 (진단·UI 기능용)."""
+        self._switch_tab("채팅", hotkey="2")
+
+    def _switch_tab(self, target: Literal["친구", "채팅"], *, hotkey: str) -> None:
+        self.focus_main()
+        pyautogui.hotkey("ctrl", hotkey)
+
+        deadline = time.monotonic() + config.TIMING.wait_tab_switch
+        last_seen: windows.MainTab = "unknown"
+        while time.monotonic() < deadline:
+            last_seen = windows.get_active_main_tab(self.main_hwnd)
+            if last_seen == target:
+                _log.debug("탭 전환 성공: %s", target)
+                return
+            time.sleep(config.TIMING.poll_interval)
+
+        raise KakaoTabError(
+            f"{target} 탭 전환 실패 (마지막 관찰 탭={last_seen!r}) — 발송 중단"
+        )
 
     # ── 검색 ─────────────────────────────────────
 
-    def search(self, query: str, *, clear_first: bool = True) -> None:
-        """현재 탭(친구 또는 채팅)의 검색창에 query 입력.
-
-        검색창은 `Ctrl+F` 로 열고, 이미 열려있다면 내용만 교체.
-        """
-        self.focus()
-        if clear_first:
-            # 기존 내용 전체 선택 후 삭제 (Shift+Home 은 검색창에서만 유효)
-            pyautogui.press("end")
-            time.sleep(0.03)
-            pyautogui.hotkey("shift", "home")
-            time.sleep(0.03)
-        else:
-            pyautogui.hotkey("ctrl", "f")
-            time.sleep(config.TIMING.after_enter)
-
-        pyperclip.copy(query)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(config.TIMING.after_search_input)
-
     def open_search(self) -> None:
-        """Ctrl+F로 검색창 열기 (이미 열려있어도 무해)."""
-        self.focus()
+        """Ctrl+F 로 검색창 열기 (이미 열려있어도 무해)."""
+        self.focus_main()
         pyautogui.hotkey("ctrl", "f")
         time.sleep(config.TIMING.after_enter)
 
     def close_search(self) -> None:
+        self.focus_main()
         pyautogui.press("escape")
         time.sleep(config.TIMING.after_enter)
 
+    def search(self, query: str, *, clear_first: bool = True) -> None:
+        """현재 탭의 검색창에 query 입력. 실행 전 `switch_to_friend_tab` 호출 필수."""
+        self.focus_main()
+        if clear_first:
+            # 기존 내용 전체 선택 후 삭제
+            pyautogui.press("end")
+            time.sleep(0.03)
+            pyautogui.hotkey("shift", "home")
+            time.sleep(0.03)
+
+        # 한글·이모지 포함 문자열은 pyautogui.typewrite 가 못 보내므로 클립보드 경유.
+        # 이 경로만 클립보드를 쓰고, 본 메시지 전송은 WM_SETTEXT 를 쓴다.
+        _set_clipboard_text(query)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(config.TIMING.after_search_input)
+
     # ── 채팅창 열기 / 닫기 ───────────────────────
 
-    def open_friend_chat(self) -> str:
-        """검색창에 친구 이름이 입력된 상태에서 1:1 채팅창 오픈.
+    def open_friend_chat(self, expected_name: str) -> windows.ChatWindow:
+        """검색창에 이름이 입력된 상태에서 1:1 채팅창 오픈 + 제목 완전일치 검증.
+
+        Phase 3 오발송 방지 2·3차 방어선:
+        - HWND 스냅샷 diff 로 새 채팅창 HWND 식별 (포커스 훔김 내성)
+        - 제목이 `expected_name` 과 완전일치 안 하면 해당 HWND 만 `WM_CLOSE` 후 예외
+
+        Args:
+            expected_name: 검증 대상 이름 (카톡 저장명). 검색어와 동일해야 안전.
 
         Returns:
-            열린 채팅창의 제목 (상대 이름 검증에 사용)
+            ChatWindow (hwnd, title, richedit_hwnd, list_hwnd).
         """
-        # 1) Enter: 첫 검색 결과 선택 (친구 탭이면 친구 프로필 포커스)
+        before = windows.snapshot_chat_hwnds()
+
         pyautogui.press("enter")
         time.sleep(config.TIMING.after_enter)
-        # 2) Alt+Enter: 1:1 채팅창 열기
         pyautogui.hotkey("alt", "enter")
         time.sleep(config.TIMING.after_alt_enter)
 
-        title = self._get_foreground_window_title()
-        _log.debug("채팅창 개방, 포그라운드 제목: %s", title)
-        return title
+        new_chat = windows.wait_for_new_chat_window(
+            before, timeout=config.TIMING.wait_new_chat_window
+        )
+        if new_chat is None:
+            raise KakaoError(
+                f"채팅창이 열리지 않음: {expected_name!r} "
+                f"(검색 결과가 없거나 친구가 아닐 수 있음)"
+            )
 
-    def close_active_chat(self) -> None:
-        pyautogui.hotkey("ctrl", "w")
+        match = detection.verify_target_title(new_chat.title, expected_name)
+        if not match.ok:
+            # 엉뚱한 창을 열었음 — HWND 직접 지정해 닫는다 (포그라운드 무관).
+            windows.post_close(new_chat.hwnd)
+            raise KakaoTargetMismatchError(
+                f"제목 불일치 — 실제={new_chat.title!r}, 기대={expected_name!r}, "
+                f"이유={match.reason}"
+            )
+
+        if new_chat.richedit_hwnd is None:
+            windows.post_close(new_chat.hwnd)
+            raise KakaoError(
+                f"채팅창은 열렸으나 입력창(RichEdit) HWND 를 못 찾음: {expected_name!r}"
+            )
+
+        self._current_chat = new_chat
+        _log.debug(
+            "채팅창 개방 확인: hwnd=%s, title=%r, richedit=%s",
+            hex(new_chat.hwnd),
+            new_chat.title,
+            hex(new_chat.richedit_hwnd),
+        )
+        return new_chat
+
+    def close_current_chat(self) -> None:
+        """현재 추적 중인 채팅창만 닫음. HWND 직접 지정."""
+        chat = self._current_chat
+        if chat is None:
+            return
+        windows.post_close(chat.hwnd)
+        self._current_chat = None
         time.sleep(config.TIMING.close_chat)
-
-    def _get_foreground_window_title(self) -> str:
-        try:
-            hwnd = win32gui.GetForegroundWindow()
-            return win32gui.GetWindowText(hwnd) or ""
-        except Exception as e:
-            _log.warning("포그라운드 창 제목 읽기 실패: %s", e)
-            return ""
 
     # ── 전송 ─────────────────────────────────────
 
     def send_text(self, text: str) -> None:
+        """현재 채팅창의 RichEdit 에 텍스트 주입 + Enter.
+
+        `SendMessage(WM_SETTEXT)` 는 기존 내용을 대체한다. `PostMessage(WM_KEYDOWN, VK_RETURN)`
+        으로 전송. 클립보드·포커스·IME 의존 없음.
+        """
         if not text:
             return
-        pyperclip.copy(text)
-        pyautogui.hotkey("ctrl", "v")
+        chat = self._require_current_chat()
+        if chat.richedit_hwnd is None:
+            raise KakaoError("입력창(RichEdit) HWND 없음 — open_friend_chat 먼저 호출")
+
+        win32gui.SendMessage(chat.richedit_hwnd, win32con.WM_SETTEXT, 0, text)
         time.sleep(config.TIMING.after_ctrl_v_text)
-        pyautogui.press("enter")
+        _post_key(chat.richedit_hwnd, win32con.VK_RETURN)
         time.sleep(config.TIMING.after_send_text)
 
     def send_image(self, image_path: Path | str) -> None:
+        """이미지 전송.
+
+        이미지는 카톡 업로드 플로우를 거쳐야 해 클립보드 DIB + Ctrl+V 경로 유지.
+        다만 수신 HWND 를 `SetFocus` 로 명시해 포커스 훔김에 덜 취약하게 만든다.
+        """
         path = Path(image_path)
         if not path.exists():
             raise KakaoError(f"이미지 파일 없음: {path}")
+        chat = self._require_current_chat()
+        if chat.richedit_hwnd is None:
+            raise KakaoError("입력창 HWND 없음")
 
         _copy_image_to_clipboard(path)
         time.sleep(0.15)
+
+        # RichEdit 에 포커스 지정 후 Ctrl+V.
+        try:
+            win32gui.SetForegroundWindow(chat.hwnd)
+        except Exception as e:
+            _log.debug("채팅창 포그라운드 실패 (계속 진행): %s", e)
+        try:
+            win32gui.SendMessage(chat.richedit_hwnd, win32con.WM_SETFOCUS, 0, 0)
+        except Exception:
+            pass
+
         pyautogui.hotkey("ctrl", "v")
-        # 카톡은 이미지 붙여넣기 시 미리보기 다이얼로그를 먼저 띄움
         time.sleep(config.TIMING.after_ctrl_v_image)
         pyautogui.press("enter")
-        # 업로드 대기 — 크기 비례
+
         wait_sec = detection.estimate_image_upload_wait(path)
         _log.debug(
-            "이미지 업로드 대기 %.2f초 (%s, %d bytes)", wait_sec, path.name, path.stat().st_size
+            "이미지 업로드 대기 %.2f초 (%s, %d bytes)",
+            wait_sec,
+            path.name,
+            path.stat().st_size,
         )
         time.sleep(wait_sec)
+
+    # ── 내부 헬퍼 ────────────────────────────────
+
+    def _require_current_chat(self) -> windows.ChatWindow:
+        if self._current_chat is None:
+            raise KakaoError("활성 채팅창 없음 — open_friend_chat 먼저 호출")
+        return self._current_chat
+
+
+# ── 모듈 레벨 헬퍼 ──────────────────────────────────
+
+
+def _post_key(hwnd: int, vk: int) -> None:
+    """특정 HWND 에 KEYDOWN/KEYUP 쌍을 Post. 캐릭터 키가 아닌 제어 키용."""
+    win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
+    time.sleep(0.02)
+    win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0)
+
+
+def _set_clipboard_text(text: str) -> None:
+    """유니코드 텍스트를 Windows 클립보드에 넣음 (pyperclip 대체)."""
+    win32clipboard.OpenClipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
+    finally:
+        win32clipboard.CloseClipboard()
 
 
 def _copy_image_to_clipboard(path: Path) -> None:
     """이미지 파일을 DIB 포맷으로 Windows 클립보드에 주입.
 
-    원본 코드의 로직을 그대로 계승 (`BMP` 헤더 14바이트 제거 후 `CF_DIB`).
+    원본 v5 의 로직을 계승 (`BMP` 헤더 14바이트 제거 후 `CF_DIB`).
     """
     with Image.open(path) as img:
         buffer = io.BytesIO()

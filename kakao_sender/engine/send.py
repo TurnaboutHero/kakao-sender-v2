@@ -18,8 +18,12 @@ from pathlib import Path
 from threading import Event
 
 from kakao_sender import config, logging_setup
-from kakao_sender.engine import detection
-from kakao_sender.engine.kakao import KakaoClient, KakaoError
+from kakao_sender.engine.kakao import (
+    KakaoClient,
+    KakaoError,
+    KakaoTabError,
+    KakaoTargetMismatchError,
+)
 
 _log = logging_setup.get_logger(__name__)
 
@@ -82,19 +86,20 @@ def send_one(
     message_variants: Sequence[str] | None = None,
     attempt: int = 1,
 ) -> SendResult:
-    """한 사람에게 전송. 예외를 잡아 SendResult로 반환."""
+    """한 사람에게 전송. 예외를 잡아 SendResult 로 반환.
+
+    Phase 3 오발송 방지 파이프라인:
+    1. `switch_to_friend_tab()` — 채팅 탭의 단톡방 혼재 결과 제거
+    2. `search(target_name)`
+    3. `open_friend_chat(target_name)` — HWND diff + 제목 완전일치 내부 검증
+    4. 이미지/텍스트 전송 (RichEdit 직접 주입)
+    5. `close_current_chat()` — 대상 HWND 만 닫음
+    """
     t0 = time.monotonic()
     try:
+        client.switch_to_friend_tab()
         client.search(job.target_name)
-        title = client.open_friend_chat()
-
-        match = detection.verify_target_title(title, job.target_name)
-        if not match.ok:
-            # 엉뚱한 채팅창이 열렸음 — 닫고 실패 반환
-            client.close_active_chat()
-            reason = f"대상 검증 실패: 창 제목={match.actual!r}, 기대={match.expected!r} ({match.reason})"
-            _log.warning("%s", reason)
-            return SendResult(job, SendOutcome.FAILED, reason, time.monotonic() - t0, attempt)
+        client.open_friend_chat(job.target_name)
 
         if job.image_path is not None:
             client.send_image(job.image_path)
@@ -103,9 +108,18 @@ def send_one(
             text_to_send = _pick_text(job.text, message_variants)
             client.send_text(text_to_send)
 
-        client.close_active_chat()
+        client.close_current_chat()
         return SendResult(job, SendOutcome.SUCCESS, "", time.monotonic() - t0, attempt)
 
+    except KakaoTargetMismatchError as e:
+        # 제목 불일치 — open_friend_chat 내부에서 이미 WM_CLOSE 전송 완료
+        _log.warning("대상 검증 실패: %s", e)
+        return SendResult(
+            job, SendOutcome.FAILED, f"대상 검증 실패: {e}", time.monotonic() - t0, attempt
+        )
+    except KakaoTabError:
+        # 친구 탭 전환 실패 — 전체 배치에 영향, 호출자가 판단하도록 재전달
+        raise
     except KakaoError as e:
         return SendResult(
             job, SendOutcome.FAILED, f"KakaoError: {e}", time.monotonic() - t0, attempt
@@ -138,6 +152,18 @@ def send_batch(
     results: list[SendResult] = []
 
     _log.info("배치 발송 시작: %d명", len(jobs))
+    # 배치 시작 시 친구 탭 강제 — 첫 건에서 단톡방 결과가 섞이는 것을 막는다.
+    # (각 건마다 send_one 내부에서도 한 번 더 호출되나 방어 과다는 무해)
+    try:
+        client.switch_to_friend_tab()
+    except KakaoTabError as e:
+        _log.error("배치 시작 직후 친구 탭 전환 실패 — 전체 중단: %s", e)
+        # 전환 실패는 전체 배치를 망치므로 모든 job 을 STOPPED 로 기록하고 반환
+        for job in jobs:
+            results.append(SendResult(job, SendOutcome.STOPPED, f"친구 탭 전환 실패: {e}"))
+            if on_result:
+                on_result(results[-1])
+        return results
     client.open_search()
 
     try:
