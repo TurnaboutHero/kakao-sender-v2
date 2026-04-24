@@ -71,7 +71,7 @@ docs/                     설계·분석 문서
 
 ## 원본과의 관계
 
-원본 `kakao_sender/kakao_sender.py` 디렉토리는 **보존**. 이 저장소는 완전히 별도 경로·별도 repo. 참조는 하지만 수정하지 않는다.
+원본 v5 는 [`legacy/`](legacy/) 에 통째로 보존되어 있다 (`kakao_sender.py`, `kakao_sender.spec`, `dist/*.exe`, `build/*`). 참조·비교용이며 수정하지 않는다. 상세는 [`legacy/README.md`](legacy/README.md).
 
 ## 주요 문서
 
