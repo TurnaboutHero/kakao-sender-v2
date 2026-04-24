@@ -48,7 +48,7 @@ def _print_header(title: str) -> None:
     print("=" * 70)
 
 
-def _build_jobs_from_roster(text: str) -> list[SendJob]:
+def _build_jobs_from_roster(text: str, image: Path | None = None) -> list[SendJob]:
     members = load_members()
     mapping = load_mapping()
     jobs: list[SendJob] = []
@@ -64,7 +64,8 @@ def _build_jobs_from_roster(text: str) -> list[SendJob]:
             SendJob(
                 target_name=entry.kakao_name,
                 legal_name=m.name,
-                text=text,
+                text=text or None,
+                image_path=image,
                 member_id=m.id,
             )
         )
@@ -78,11 +79,12 @@ def _filter_who(jobs: list[SendJob], who: str) -> list[SendJob]:
     return [j for j in jobs if j.target_name == who or j.legal_name == who]
 
 
-def _trap_job(text: str) -> SendJob:
+def _trap_job(text: str, image: Path | None = None) -> SendJob:
     return SendJob(
         target_name=TRAP_NAME,
         legal_name="(함정) 단톡방 이름으로 위장",
-        text=text,
+        text=text or None,
+        image_path=image,
         member_id="trap-target",
     )
 
@@ -153,7 +155,13 @@ def main() -> int:
     parser.add_argument(
         "--text",
         default=DEFAULT_MSG,
-        help=f"보낼 메시지 (기본: {DEFAULT_MSG!r})",
+        help=f"보낼 메시지 (기본: {DEFAULT_MSG!r}). 빈 문자열이면 이미지만 전송.",
+    )
+    parser.add_argument(
+        "--image",
+        type=Path,
+        default=None,
+        help="첨부 이미지 경로 (jpg/png/bmp). 지정되면 텍스트보다 먼저 전송.",
     )
     parser.add_argument(
         "--debug", action="store_true", help="DEBUG 로그 on"
@@ -169,26 +177,33 @@ def main() -> int:
     print(f"  ROSTER_CSV  = {config.ROSTER_CSV}")
     print(f"  MAPPING_JSON= {config.MAPPING_JSON}")
     print(f"  MESSAGE     = {args.text!r}")
+    if args.image:
+        img_size = args.image.stat().st_size if args.image.exists() else -1
+        print(f"  IMAGE       = {args.image} ({img_size:,} bytes)")
     print(f"  SEND 모드   = {args.send}")
+
+    if args.image and not args.image.exists():
+        print(f"[ERROR] 이미지 파일 없음: {args.image}")
+        return 6
 
     if args.list:
         _print_header("명단 + 매핑")
-        jobs = _build_jobs_from_roster(args.text)
+        jobs = _build_jobs_from_roster(args.text, args.image)
         _print_jobs(jobs)
         return 0
 
     if args.trap:
         _print_header("함정 테스트 — 단톡방 제목을 '저장명' 으로 속여 투입")
-        jobs = [_trap_job(args.text)]
+        jobs = [_trap_job(args.text, args.image)]
         print("  기대 동작: open_friend_chat 단계에서 제목 완전일치 실패 → FAILED")
     elif args.who:
-        jobs = _filter_who(_build_jobs_from_roster(args.text), args.who)
+        jobs = _filter_who(_build_jobs_from_roster(args.text, args.image), args.who)
         _print_header(f"단일 대상 — {args.who!r}")
         if not jobs:
             print("  매칭되는 대상 없음. --list 로 명단 확인 후 정식명/저장명으로 재시도.")
             return 4
     else:  # args.all
-        jobs = _build_jobs_from_roster(args.text)
+        jobs = _build_jobs_from_roster(args.text, args.image)
         _print_header(f"전원 발송 ({len(jobs)}명)")
 
     _print_jobs(jobs)

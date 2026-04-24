@@ -338,8 +338,14 @@ class KakaoClient:
     def send_image(self, image_path: Path | str) -> None:
         """이미지 전송.
 
-        이미지는 카톡 업로드 플로우를 거쳐야 해 클립보드 DIB + Ctrl+V 경로 유지.
-        다만 수신 HWND 를 `SetFocus` 로 명시해 포커스 훔김에 덜 취약하게 만든다.
+        카톡 이미지 업로드 플로우:
+        1. Ctrl+V → **미리보기 다이얼로그** 팝업 (카톡이 자체 렌더링)
+        2. Enter → 업로드 시작
+        3. 업로드 완료까지 대기 (파일 크기 비례 — 원본 v5 이미지 잘림 이유)
+        4. 호출자가 close_current_chat 으로 창 닫음 — 업로드 중 닫히면 잘림
+
+        포커스: `_force_foreground` 로 채팅창을 확실히 포그라운드로 (SetForegroundWindow
+        직접 호출은 백그라운드 프로세스에서 silently reject 됨).
         """
         path = Path(image_path)
         if not path.exists():
@@ -348,29 +354,32 @@ class KakaoClient:
         if chat.richedit_hwnd is None:
             raise KakaoError("입력창 HWND 없음")
 
+        size_bytes = path.stat().st_size
+
+        # 1) 클립보드에 이미지 주입
         _copy_image_to_clipboard(path)
         time.sleep(0.15)
 
-        # RichEdit 에 포커스 지정 후 Ctrl+V.
-        try:
-            win32gui.SetForegroundWindow(chat.hwnd)
-        except Exception as e:
-            _log.debug("채팅창 포그라운드 실패 (계속 진행): %s", e)
-        try:
-            win32gui.SendMessage(chat.richedit_hwnd, win32con.WM_SETFOCUS, 0, 0)
-        except Exception:
-            pass
+        # 2) 채팅창 포그라운드 확보 — AttachThreadInput 우회 포함
+        _force_foreground(chat.hwnd)
+        time.sleep(config.TIMING.focus_settle)
 
+        # 3) Ctrl+V → 카톡 미리보기 다이얼로그가 뜸
+        _log.debug("이미지 paste: %s (%d bytes)", path.name, size_bytes)
         pyautogui.hotkey("ctrl", "v")
         time.sleep(config.TIMING.after_ctrl_v_image)
+
+        # 4) Enter → 다이얼로그 확인, 업로드 시작
         pyautogui.press("enter")
 
+        # 5) 업로드 완료 대기 (파일 크기 비례). 이 시간이 너무 짧으면 close 가
+        #    업로드를 자름 (원본 v5 의 핵심 결함).
         wait_sec = detection.estimate_image_upload_wait(path)
-        _log.debug(
-            "이미지 업로드 대기 %.2f초 (%s, %d bytes)",
+        _log.info(
+            "이미지 업로드 대기 %.2f초 (%s, %.1f MB)",
             wait_sec,
             path.name,
-            path.stat().st_size,
+            size_bytes / (1024 * 1024),
         )
         time.sleep(wait_sec)
 
