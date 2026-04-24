@@ -33,11 +33,11 @@ Phase 2 에서 "채팅창 전용 조사 필요 — 수동 재조사" 로 남겨�
 |---|---|---|---|
 | `0x10610` | `카카오톡` | 메인 창 | 메인 뷰들 (ContactListView, ChatRoomListView, MoreView, LockModeView 등) + 광고 자식 창 |
 | `0x6b0ed4` | `회원가` | 1:1 채팅창 | RichEdit + 메시지 ListControl |
-| `0xa00dd4` | `샘플 광주지구 전체톡방` | 단톡방 | RichEdit + 메시지 ListControl (1:1 과 동일) |
+| `0xa00dd4` | `모임 단톡방 (예시)` | 단톡방 | RichEdit + 메시지 ListControl (1:1 과 동일) |
 | `0xac0e2a` | (공백) | 단톡방 참여자 패널 | 참여자 ListControl + 검색 Edit |
 | `0x10a82` | (공백) | MOMENT 광고 팝업 | Chrome_WidgetWin_* 자식 뭉치 |
 
-**오발송 관점 경고**: 1:1 채팅창과 단톡방이 **클래스·자식 패턴·제목 형식까지 구별 불가**. 제목만 보면 "샘플 광주지구 전체톡방" 같이 긴 단톡방명과 "회원가" 같은 개인톡이 섞여 있어, **창이 열린 뒤 제목만으로 단톡방인지 아닌지 알 수 없다.**
+**오발송 관점 경고**: 1:1 채팅창과 단톡방이 **클래스·자식 패턴·제목 형식까지 구별 불가**. 제목만 보면 "모임 단톡방 (예시)" 같이 긴 단톡방명과 "회원가" 같은 개인톡이 섞여 있어, **창이 열린 뒤 제목만으로 단톡방인지 아닌지 알 수 없다.**
 
 ### 채팅창 내부 (1:1·단톡방 공통)
 
@@ -108,7 +108,7 @@ UIA 트리는 빈 Pane + 해시 이름만 주지만, win32 경로는 의미 있�
 
 UIA 는 단톡방 창의 **UIA 자식**으로 이 패널을 보여줌 (win32 부모-자식 관계 없음에도 불구하고):
 ```
-[PaneControl] name='샘플 광주지구 전체톡방' id=''
+[PaneControl] name='모임 단톡방 (예시)' id=''
 ├─ [PaneControl] id=''                                        ← 참여자 패널
 │  ├─ [PaneControl] id='1003'                                 ← 참여자 리스트
 │  │  └─ [PaneControl] id='202'                               ← 스크롤바
@@ -183,6 +183,97 @@ python scripts/investigate.py --tab-state  # 현재 활성 탭 (친구/채팅/�
 python scripts/investigate.py --win32-tree # 메인 창 win32 자식 (UIA 대비)
 python scripts/investigate.py --panel      # 참여자 패널 구조
 ```
+
+---
+
+## Phase 3-2 실기기 dry-run 에서 드러난 실패들 (2026-04-24)
+
+4명(소규모 모임) 대상 실기기 dry-run 에서 **정적 분석으로 잡히지 않은 카톡 PC 의 실제 동작**들이 드러남. 각각 설계 전제를 뒤집었고, 아래는 **실패한 시도와 정정한 이유** 순서대로 기록. 나중에 같은 가정을 반복하지 않기 위한 방지책. (개인정보성 문자열은 회원A~D / 모임 단톡방 등으로 익명화.)
+
+### ① 자동 탭 전환: **카톡 PC 에 친구/채팅 탭 단축키 자체가 없음**
+
+- **최초 가정**: Ctrl+1=친구, Ctrl+2=채팅 (원본 v5 가정을 그대로 계승)
+- **실측**: `pyautogui.hotkey("ctrl", "1")` 을 쏴도 탭이 안 바뀜. 공식 단축키 목록 (https://cs.kakao.com/helps_html/1073209659) 확인 결과 **사이드바 탭 전환 단축키 자체가 존재하지 않음**
+- **정정**: `switch_to_friend_tab` 을 자동 전환 대신 **"확인만"** 하는 `require_friend_tab` 으로 교체. 친구 탭이 아니면 명확한 에러 + 사용자 수동 전환 요청.
+- **설계 교훈**: 가정한 단축키가 있는지는 공식 문서를 먼저 확인할 것. 원본 v5 는 "담당자가 친구 탭에 맞춰놓고 실행" 을 전제했지 자동 전환을 안 했다 — 이걸 놓침.
+
+### ② `Ctrl+A` = **친구 추가** (select-all 아님)
+
+- **최초 가정**: 검색창 내용 전체 선택에 `Ctrl+A` 를 쓰면 간결함
+- **실측**: `Ctrl+A` 를 누르면 **친구 추가 다이얼로그가 뜸**. 공식 단축키 목록에 "친구 추가: Ctrl+A" 명시. 이후 덤프로 검색창에 "회원C (그룹 회원B (그룹" 같은 **커서 위치 삽입 결과** 관측됨.
+- **정정**: 표준 `Ctrl+A` 가정을 폐기. `End`+`Shift+Home` 시도했으나 포커스가 검색창 밖으로 새면 실패 → 결국 **HWND 직접 조작** 으로 대체 (아래 ④).
+- **설계 교훈**: OS 표준 단축키라고 앱 내에서도 같은 의미라는 보장 없음.
+
+### ③ `WM_SETTEXT` → RichEdit 에 **메시지 전송 버튼이 활성화되지 않음** (반자동화 감지)
+
+- **최초 가정**: `SendMessage(richedit, WM_SETTEXT, text)` + `PostMessage(WM_KEYDOWN, VK_RETURN)` 으로 **클립보드·포커스·IME 의존 0** 달성 가능
+- **실측**: WM_SETTEXT 로 텍스트를 주입하면 텍스트는 보이지만 **전송 버튼이 회색으로 비활성 유지**. Enter 로도 전송 안 됨. 사용자 증언: "수동 타이핑은 되는데 너가 넣은 건 안 먹힘". 카톡의 명시적 반자동화 감지.
+- **정정**: 텍스트도 이미지와 동일한 **클립보드 + Ctrl+V** 경로로 통일. 붙여넣기 이벤트는 "실제 입력" 으로 인식되어 전송 버튼 활성화. 원본 v5 가 이 경로를 쓴 이유가 이것이었음.
+- **설계 교훈**: 카톡은 "얼마나 사용자처럼 보이는 입력인가" 로 자동화를 탐지. WM_SETTEXT 같은 우회는 입력 이벤트 stream 이 없어 걸림. Ctrl+V 는 실제 시스템 레벨 paste 이벤트라 통과.
+
+### ④ 검증 로직이 **placeholder 텍스트를 내용으로 오판**
+
+- **최초 가정**: 전송 성공 후 RichEdit 가 비면 (`remaining.strip() == ""`) 성공
+- **실측**: 비어있는 RichEdit 는 `WM_GETTEXT` 에 `'메시지 입력'` (카톡 placeholder) 을 반환. 이를 내용으로 오판해 **정상 전송을 실패로 잘못 분류**.
+- **정정**: "비어있나" 대신 **"우리가 보낸 텍스트가 남아있나"** 로 검증 기준 전환. `text.strip() in remaining` 이 참일 때만 실패 처리.
+- **설계 교훈**: 입력창의 placeholder 존재를 염두에 두지 않음. 현대 앱의 Edit 컨트롤은 WM_GETTEXT 로 placeholder 를 반환하는 경우가 흔함.
+
+### ⑤ 검색창 연속 검색이 **이전 검색어 위에 덧붙음**
+
+- **최초 가정**: `Ctrl+F` (검색창 포커스) → `End`+`Shift+Home` (전체 선택) → `Ctrl+V` (교체) 로 각 반복마다 깨끗한 검색 가능
+- **실측**: 첫 번째는 OK, 이후는 **이전 검색어와 커서 위치 상태가 예측 불가능**. "회원B (그룹)" + "회원C (그룹)" 가 덧붙어 `"회원C (그룹 회원B (그룹)그룹)"` 같은 상태 발생. 원인: 채팅창 전송·close 후 포커스가 메인 창 안에서 검색창 아닌 곳으로 이동.
+- **정정 1차**: `Ctrl+A` 추가 → ② 때문에 실패
+- **정정 2차**: `Esc` + `Ctrl+F` 재오픈으로 상태 리셋 → 여전히 불안정
+- **정정 3차 (최종)**: **검색 Edit HWND 직접 조작**. `find_friend_tab_search_edit(main_hwnd)` 로 HWND 획득 → `SendMessage(EM_SETSEL, 0, -1)` 전체 선택 → `WM_CLEAR` 삭제 → `WM_SETTEXT "" ` 방어적 clear → `SetFocus` → `Ctrl+V`. 배치 3건 연속 모두 "기존 내용='회원B (그룹)' → clear 후=''" 로그로 검증 통과.
+- **설계 교훈**: pyautogui 같은 **물리 키보드 시뮬레이션은 포커스라는 글로벌 상태에 의존**해 배치 반복에 취약. Edit HWND 가 노출된 경우 `EM_SETSEL`/`WM_CLEAR` 같은 **표준 Edit 메시지**가 포커스 무관하게 작동.
+
+### ⑥ `SetForegroundWindow` 가 **백그라운드 프로세스에서 조용히 거부됨**
+
+- **최초 가정**: `win32gui.SetForegroundWindow(kakao_hwnd)` 한 번이면 포그라운드로 옴
+- **실측**: 다른 프로세스(예: 자동화 러너) 에서 호출 시 Windows 가 보안상 **silently reject** (반환은 False 지만 예외 없음). 결과: 핫키가 엉뚱한 창으로 감.
+- **정정**: `_force_foreground` 헬퍼 신설 — 현재 포그라운드 스레드에 `AttachThreadInput` 으로 일시 attach → `BringWindowToTop` + `SetForegroundWindow` → detach. 이후 `GetForegroundWindow() == hwnd` 확인해 실패 시 명확한 에러.
+- **설계 교훈**: Windows 는 의도적으로 포커스 하이재킹을 막음. 정당한 사용자 자동화도 `AttachThreadInput` 트릭 없이는 안 됨.
+
+### ⑦ false positive 로 인한 **전송 성공 오보** (1회 발생)
+
+- **증상**: 드라이런 첫 시도에서 스크립트가 `✅ 회원A (2.1s)` 로 성공 보고했으나 **실제 메시지는 전송 안 됨** (사용자가 육안 확인).
+- **원인**: ③ (WM_SETTEXT + PostMessage VK_RETURN 이 안 먹힘) + ④ (placeholder 를 내용으로 오판) 가 조합된 상태에서, 검증 로직이 아예 없었음. 전송을 시도하고 바로 "성공" 기록.
+- **정정**: ③ + ④ + **전송 후 검증 단계를 필수로 삽입**. 검증 실패 시 `KakaoError` raise → `send_one` 이 `FAILED` 로 기록. 이로써 "보고된 성공" 과 "실제 전송" 이 일치.
+- **설계 교훈**: 자동화 결과는 **반드시 독립적 관찰로 검증**. 스크립트의 자기보고를 믿지 말 것. 실기기에서 한 번 false positive 가 나면 162명 배치에서 돌이킬 수 없음.
+
+### 최종 파이프라인 (검증 완료)
+
+```
+send_one(job):
+  require_friend_tab()                                      ← 1차 방어 (수동 전환 요구)
+  search(target_name):
+    Ctrl+F 로 검색 UI 활성화
+    find_friend_tab_search_edit(main_hwnd)                  ← HWND 획득
+    EM_SETSEL(0,-1) + WM_CLEAR + WM_SETTEXT "" 로 필드 초기화 ← 포커스 무관
+    SetFocus(search_edit)
+    Ctrl+V 로 query 붙여넣기                                 ← live search 트리거
+  existing = snapshot_chat_hwnds()
+  Enter + Alt+Enter
+  new_chat = wait_for_new_chat_window(existing, 2s)         ← 2차 방어 (HWND diff)
+  if not new_chat: FAILED
+  verify_target_title(new_chat.title, target_name) 완전일치  ← 3차 방어
+  if not match:
+    PostMessage(new_chat.hwnd, WM_CLOSE)
+    FAILED
+  send_text(text):
+    force_foreground(chat.hwnd)
+    _set_clipboard_text(text)
+    Ctrl+V                                                  ← 반자동화 우회
+    Enter
+    verify: text not in WM_GETTEXT(richedit)                ← false positive 차단
+  close_current_chat()  # PostMessage(WM_CLOSE) on chat HWND
+```
+
+### 실기기 dry-run 결과 (4명 실제 발송)
+
+- Phase A 개별: ✅ 회원A, ✅ 회원C, ✅ 회원D (각 단건 2.1~2.7s)
+- Phase B 함정: ✅ 단톡방 이름 (모임 단톡방 예시) 을 저장명으로 위장 → **채팅창 안 열림** 단계에서 차단 (3.2s, no message sent)
+- Phase C 배치: ✅ 회원B/회원C/회원D 3연속 (각 2.6s, 간격 7s) — 검색 필드 `"회원B (그룹)" → '' → "회원C (그룹)"` 전환 로그로 검증
 
 ---
 

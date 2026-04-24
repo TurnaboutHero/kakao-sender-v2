@@ -18,7 +18,7 @@ def test_classify_toplevel_picks_main_and_chats():
     rows = [
         (0x10610, HWND_CLASSES.chat_window, "카카오톡"),
         (0x6B0ED4, HWND_CLASSES.chat_window, "회원가"),
-        (0xA00DD4, HWND_CLASSES.chat_window, "샘플 광주지구 전체톡방"),
+        (0xA00DD4, HWND_CLASSES.chat_window, "모임 단톡방 (예시)"),
         (0xAC0E2A, HWND_CLASSES.chat_window, ""),  # 참여자 패널 — 제목 빈문자열
         (0x10A82, HWND_CLASSES.chat_window, ""),  # 광고
         (0x12345, "SomeOther", "노이즈"),
@@ -27,7 +27,7 @@ def test_classify_toplevel_picks_main_and_chats():
     assert main == 0x10610
     # 제목이 비어있는 EVA_Window_Dblclk 는 채팅창에서 제외
     assert (0x6B0ED4, "회원가") in chats
-    assert (0xA00DD4, "샘플 광주지구 전체톡방") in chats
+    assert (0xA00DD4, "모임 단톡방 (예시)") in chats
     assert len(chats) == 2
 
 

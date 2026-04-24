@@ -42,14 +42,17 @@
 - 메인 창도 `EnumChildWindows` 로 훑으면 `ContactListView_*`, `ChatRoomListView_*`, `MoreView_*`, `LockModeView_*` 등 의미 있는 뷰 이름 + 활성 여부 (rect 0) 를 얻을 수 있음.
 - 단톡방 참여자 패널도 별도 top-level HWND. 검색 `Edit` + 리스트 `EVA_VH_ListControl_Dblclk` 구조.
 
-**현실 전략**:
+**현실 전략** (Phase 3-2 dry-run 반영):
+
 - 창 탐색: `EnumWindows` + 클래스 `EVA_Window_Dblclk` + 제목 매칭
-- 탭 전환: `Ctrl+1/2` 핫키 + `EnumChildWindows` + `IsWindowVisible` 로 전환 성공 검증 (실패 감지)
+- **탭 전환은 안 함** — 공식 단축키 목록에 친구/채팅 탭 전환 단축키 자체가 없음. `require_friend_tab` 은 *확인만* 하고 아니면 에러 → 사용자 수동 전환 요구.
 - 채팅창 열기: **HWND 스냅샷 diff** (`snapshot → Enter+Alt+Enter → wait_for_new_hwnd`). `GetForegroundWindow` 의존 제거 — 포커스 훔김 내성 확보.
-- 텍스트 전송: `SendMessage(richedit, WM_SETTEXT)` + `PostMessage(WM_KEYDOWN, VK_RETURN)`. 클립보드·pyautogui 불필요.
+- 검색 입력: 친구 탭 `ContactListView` 의 **검색 Edit HWND 직접 조작** (`EM_SETSEL`+`WM_CLEAR`+`WM_SETTEXT ""`) 으로 필드 초기화 → `SetFocus` → 클립보드 + `Ctrl+V` 로 query 붙여넣기 (kakao live search 트리거). pyautogui 키보드 경로는 배치 반복 시 포커스 예측 불가로 실패.
+- 텍스트 전송: **클립보드 + `Ctrl+V` + `Enter`** (실측상 `WM_SETTEXT` 로 주입하면 **전송 버튼이 비활성 유지**되는 반자동화 감지가 있음). 전송 후 `WM_GETTEXT` 로 보낸 텍스트가 남아있는지 확인해 false positive 차단.
 - 채팅창 닫기: `PostMessage(chat_hwnd, WM_CLOSE)` — HWND 직접 지정, 엉뚱한 창 닫음 방지.
-- 이미지 전송: 클립보드 + Ctrl+V 는 유지 (DIB 직접 주입이 카톡의 업로드 플로우를 우회하지 못함). 단 포커스는 RichEdit HWND 에 `SetFocus` 로 명시.
+- 이미지 전송: 클립보드 DIB + Ctrl+V. 포커스는 RichEdit HWND 에 `SetFocus` 로 명시.
 - 이미지 업로드 완료: 여전히 파일 크기 비례 고정 대기. 메시지 ListControl 자식 수 변화 감지는 미검증 — Phase C 과제.
+- 포커스 확보: `_force_foreground` (`AttachThreadInput` 트릭) 으로 Windows 의 "백그라운드 프로세스 포커스 훔김 방지" 우회.
 
 UIA 는 **입력창 `AutomationId='1006'`** 발견 등 보조 경로로 존재하지만, 주력 아님.
 
@@ -91,7 +94,7 @@ rest_duration: float = 45.0
 
 `.gitignore` 에 `data/`, `logs/`, `members.*`, `mapping.*` 포함. 동아리 회원 명단·카톡 저장명은 개인정보. public-safe repo라도 최소화.
 
-### D8. 클립보드·`pyautogui` 의존 최소화 (Phase 3 신설)
+### D8. 카톡 반자동화 감지 대응 — 입력은 Ctrl+V, 검증은 HWND (Phase 3-2 정정)
 
 원본 v5 는 모든 입력을 `pyperclip` 으로 클립보드에 복사 + `pyautogui.hotkey('ctrl', 'v')` + `pyautogui.press('enter')` 로 발사했다. 문제:
 
@@ -99,7 +102,19 @@ rest_duration: float = 45.0
 - 발송 중 포커스가 다른 창으로 가면 키가 엉뚱한 곳으로 감
 - IME 상태가 한글이면 간헐적 깨짐
 
-Phase 3 에서 `RICHEDIT50W` 가 **표준 MS RichEdit** 임을 확인. 따라서 텍스트는 `SendMessage(WM_SETTEXT)` + `PostMessage(WM_KEYDOWN, VK_RETURN)` 로 HWND 에 직접 주입. **클립보드·포커스·IME 의존 0**. 이미지는 포맷 복잡도 때문에 클립보드 DIB 경로 유지하되 `SetFocus(richedit_hwnd)` 로 수신 창 명시.
+Phase 3 초안은 `WM_SETTEXT` 로 RichEdit 에 직접 주입하면 위 문제를 피하면서 빠르다고 봤지만, Phase 3-2 실기기 dry-run (`docs/investigation.md` Phase 3-2) 에서 **카톡의 반자동화 감지가 WM_SETTEXT 경로를 차단**하는 것이 확인됐다:
+
+- RichEdit 에 WM_SETTEXT 로 텍스트를 넣으면 표시는 되지만 **전송 버튼이 회색 비활성**
+- Enter (물리·가상) 모두 무시
+- 수동 타이핑·클립보드 Ctrl+V 는 정상 작동
+
+따라서 **메시지 입력은 클립보드+Ctrl+V 로 돌리고**, 대신 세 가지를 보강한다:
+
+1. `_force_foreground` 로 채팅창 HWND 를 **반드시 포그라운드** 로 올려 paste 가 해당 창에 감 (AttachThreadInput 우회)
+2. 클립보드 접근은 자체 구현 (`_set_clipboard_text` with `CF_UNICODETEXT`) — pyperclip 의존 제거
+3. 전송 직후 `WM_GETTEXT` 로 richedit 내용 확인해 **보낸 텍스트가 남아있으면 실패 raise** (placeholder `메시지 입력` 과 구분해 `text in remaining` 로 판정)
+
+검색창 입력은 **반자동화 감지 대상이 아니라서** (전송 버튼 상태머신이 없으므로) `EM_SETSEL`+`WM_CLEAR`+`WM_SETTEXT ""` 로 HWND 직접 초기화 후 `Ctrl+V` 로 붙여넣는다. 덕분에 배치 반복 시 포커스 이동에 무관한 안정성을 확보.
 
 ### D9. 단톡방 참여자 리스트 자동 추출 불가 (Phase 3 신설)
 
