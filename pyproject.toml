@@ -37,7 +37,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["build", "dist", ".venv"]
+extend-exclude = ["build", "dist", ".venv", "legacy"]
 
 [tool.ruff.lint]
 select = [

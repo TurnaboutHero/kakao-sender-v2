@@ -13,11 +13,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import io
 import time
 from pathlib import Path
 
-import ctypes
 import pyautogui
 import win32api
 import win32clipboard
@@ -182,9 +183,7 @@ class KakaoClient:
         # 2) 검색 Edit 찾기 + 진단 로그
         search_hwnd = windows.find_friend_tab_search_edit(self.main_hwnd)
         if search_hwnd is None:
-            raise KakaoError(
-                "친구 탭 검색 Edit 을 찾지 못함 — 친구 탭 상태 확인 필요"
-            )
+            raise KakaoError("친구 탭 검색 Edit 을 찾지 못함 — 친구 탭 상태 확인 필요")
         current = _get_richedit_text(search_hwnd)
         _log.info("search HWND=%s, 기존 내용=%r", hex(search_hwnd), current[:40])
 
@@ -200,7 +199,7 @@ class KakaoClient:
         try:
             win32gui.SendMessage(search_hwnd, win32con.WM_SETTEXT, 0, "")
         except Exception as e:
-            _log.debug("WM_SETTEXT \"\" 실패: %s", e)
+            _log.debug('WM_SETTEXT "" 실패: %s', e)
 
         after_clear = _get_richedit_text(search_hwnd)
         _log.info("search HWND=%s, clear 후=%r", hex(search_hwnd), after_clear[:40])
@@ -246,8 +245,7 @@ class KakaoClient:
         )
         if new_chat is None:
             raise KakaoError(
-                f"채팅창이 열리지 않음: {expected_name!r} "
-                f"(검색 결과가 없거나 친구가 아닐 수 있음)"
+                f"채팅창이 열리지 않음: {expected_name!r} (검색 결과가 없거나 친구가 아닐 수 있음)"
             )
 
         match = detection.verify_target_title(new_chat.title, expected_name)
@@ -307,10 +305,8 @@ class KakaoClient:
         # 1) 채팅창 포그라운드 + RichEdit 포커스 (Ctrl+V 수신 대상 명확화)
         _force_foreground(chat.hwnd)
         time.sleep(config.TIMING.focus_settle)
-        try:
+        with contextlib.suppress(Exception):
             win32gui.SendMessage(chat.richedit_hwnd, win32con.WM_SETFOCUS, 0, 0)
-        except Exception:
-            pass
 
         # 2) 클립보드에 텍스트 넣기
         _set_clipboard_text(text)
@@ -415,20 +411,16 @@ def _force_foreground(hwnd: int) -> None:
             _log.debug("AttachThreadInput 실패 (계속 진행): %s", e)
 
     try:
-        try:
+        with contextlib.suppress(Exception):
             win32gui.BringWindowToTop(hwnd)
-        except Exception:
-            pass
         try:
             win32gui.SetForegroundWindow(hwnd)
         except Exception as e:
             raise KakaoFocusError(f"SetForegroundWindow 실패: {e}") from e
     finally:
         if attached:
-            try:
+            with contextlib.suppress(Exception):
                 win32process.AttachThreadInput(current_thread, fg_thread, False)
-            except Exception:
-                pass
 
 
 def _post_key(hwnd: int, vk: int) -> None:

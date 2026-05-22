@@ -18,6 +18,7 @@ Phase 2 (UIA 중심) 와 Phase 3 (win32 HWND 중심) 양쪽 조사 경로 모두
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -84,12 +85,10 @@ def dump_win32_tree(hwnd: int, *, depth: int = 0, max_depth: int = 10) -> None:
     except Exception as e:
         print(f"{'  ' * depth}[ERROR] {e}")
         return
-    try:
+    with contextlib.suppress(Exception):
         win32gui.EnumChildWindows(
             hwnd, lambda ch, _: dump_win32_tree(ch, depth=depth + 1, max_depth=max_depth), None
         )
-    except Exception:
-        pass
 
 
 def list_eva_windows() -> list[tuple[int, str, str, tuple[int, int, int, int]]]:
@@ -114,7 +113,7 @@ def cmd_chats(max_depth: int) -> int:
     """모든 EVA_Window_Dblclk 창 목록 + 각 창의 win32 자식 트리."""
     rows = list_eva_windows()
     print(f"# EVA_Window_Dblclk top-level 창 {len(rows)}개")
-    for hwnd, cls, title, rect in rows:
+    for hwnd, _cls, title, rect in rows:
         print(f"  {hex(hwnd)} {title!r:40} rect={rect}")
 
     for hwnd, _cls, title, _rect in rows:

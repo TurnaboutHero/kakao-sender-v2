@@ -163,9 +163,7 @@ def main() -> int:
         default=None,
         help="첨부 이미지 경로 (jpg/png/bmp). 지정되면 텍스트보다 먼저 전송.",
     )
-    parser.add_argument(
-        "--debug", action="store_true", help="DEBUG 로그 on"
-    )
+    parser.add_argument("--debug", action="store_true", help="DEBUG 로그 on")
     args = parser.parse_args()
 
     logging_setup.configure(level=logging.DEBUG if args.debug else logging.INFO)
@@ -220,7 +218,7 @@ def main() -> int:
 
     # 마지막 안전장치
     print()
-    print(f"3초 후 발송 시작. Ctrl+C 로 중단 가능.")
+    print("3초 후 발송 시작. Ctrl+C 로 중단 가능.")
     time.sleep(3)
 
     return _run_send(jobs)

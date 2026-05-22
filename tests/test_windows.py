@@ -10,7 +10,6 @@ import pytest
 from kakao_sender.config import HWND_CLASSES, UIA_NAMES
 from kakao_sender.engine import windows as w
 
-
 # ── classify_toplevel ──────────────────────────────────
 
 
