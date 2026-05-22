@@ -34,14 +34,14 @@ def test_roundtrip_save_load(tmp_path: Path) -> None:
     original = [
         Member(name="회원가", group="A요회", birthday="03-15"),
         Member(name="회원나", group="B요회", birthday="11-02", phone_last4="1234", active=False),
-        Member(name="회원나", note="해외 거주"),
+        Member(name="회원다", note="해외 거주"),
     ]
     save_members(original, csv_path)
 
     loaded = load_members(csv_path)
     assert len(loaded) == 3
     names = {m.name for m in loaded}
-    assert names == {"회원가", "회원나", "회원나"}
+    assert names == {"회원가", "회원나", "회원다"}
 
     jinseo = next(m for m in loaded if m.name == "회원나")
     assert jinseo.group == "B요회"
@@ -49,9 +49,9 @@ def test_roundtrip_save_load(tmp_path: Path) -> None:
     assert jinseo.phone_last4 == "1234"
     assert jinseo.active is False
 
-    chulsoo = next(m for m in loaded if m.name == "회원나")
-    assert chulsoo.note == "해외 거주"
-    assert chulsoo.active is True
+    member_c = next(m for m in loaded if m.name == "회원다")
+    assert member_c.note == "해외 거주"
+    assert member_c.active is True
 
 
 def test_load_missing_file_returns_empty(tmp_path: Path) -> None:
