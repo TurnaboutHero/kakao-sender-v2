@@ -71,7 +71,7 @@ docs/                     설계·분석 문서
 
 ## 원본과의 관계
 
-원본 v5 는 [`legacy/`](legacy/) 에 통째로 보존되어 있다 (`kakao_sender.py`, `kakao_sender.spec`, `dist/*.exe`, `build/*`). 참조·비교용이며 수정하지 않는다. 상세는 [`legacy/README.md`](legacy/README.md).
+원본 v5 의 소스와 빌드 스펙은 [`legacy/`](legacy/) 에 보존되어 있다. 빌드 산출물과 실제 명단 파일은 공개 저장소에 포함하지 않는다. 상세는 [`legacy/README.md`](legacy/README.md).
 
 ## 주요 문서
 

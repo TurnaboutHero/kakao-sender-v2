@@ -1,7 +1,7 @@
 # legacy/ — v5 원본 아카이브
 
 동아리 선배가 Claude 채팅(무료)으로 만든 **원본 `kakao_sender.py` v5**. 구조적 결함
-때문에 v2 (상위 디렉토리) 로 재작성됐지만, 역사·비교·재현 목적으로 통째로 보존한다.
+때문에 v2 (상위 디렉토리) 로 재작성됐지만, 역사·비교·재현 목적으로 소스만 보존한다.
 
 ## 포함물
 
@@ -9,9 +9,11 @@
 | --- | --- | --- |
 | `kakao_sender.py` | 33 KB | 단일 파일 (Tkinter UI + 카톡 자동화, 796 줄) |
 | `kakao_sender.spec` | 1 KB | PyInstaller 빌드 스펙 |
-| `dist/카카오톡_자동발송기.exe` | 20 MB | 빌드된 바이너리 |
-| `dist/members.json` | 54 B | 당시 사용 중이던 명단 (개인정보 제거됨) |
-| `build/kakao_sender/` | — | PyInstaller 중간 산출물 (참고용) |
+
+제외한 항목:
+
+- `dist/`, `build/`: 재생성 가능한 PyInstaller 산출물
+- `members.json`, `members.csv`, `mapping.json`: 사용자 명단·매핑 데이터
 
 ## 왜 v2 로 다시 썼는가
 
@@ -31,7 +33,6 @@
 - 어차피 의존성(`pyautogui`, `pyperclip`, `pywin32`, `Pillow`) 은 v2 `pyproject.toml`
   에 이미 들어 있음. 꼭 실행해야 한다면: `uv run python legacy/kakao_sender.py`.
 
-## members.json 의 개인정보성 이름
+## 공개 저장소 기준
 
-`dist/`와 실제 명단 파일은 공개 저장소에 보존하지 않는다.
-공개 전환 시에는 익명화 또는 제외 필요.
+실제 명단과 담당자별 카톡 저장명은 개인정보이므로 이 디렉토리에도 커밋하지 않는다.

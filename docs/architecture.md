@@ -92,7 +92,7 @@ rest_duration: float = 45.0
 
 ### D7. 데이터는 커밋하지 않는다
 
-`.gitignore` 에 `data/`, `logs/`, `members.*`, `mapping.*` 포함. 동아리 회원 명단·카톡 저장명은 개인정보. public-safe repo라도 최소화.
+`.gitignore` 에 `data/`, `logs/`, `members.*`, `mapping.*` 포함. 동아리 회원 명단·카톡 저장명은 개인정보이므로 공개 저장소에는 커밋하지 않는다.
 
 ### D8. 카톡 반자동화 감지 대응 — 입력은 Ctrl+V, 검증은 HWND (Phase 3-2 정정)
 
@@ -141,7 +141,7 @@ Phase 3 초안은 `WM_SETTEXT` 로 RichEdit 에 직접 주입하면 위 문제�
 1. `data/` 폴더 생성
 2. `data/members.csv` 는 UI의 "legacy .json 불러오기" 로 자동 생성
 3. 매핑은 담당자가 "동명 자동 채우기" 후 검토·수정
-4. 원본 `카카오톡_자동발송기.exe` 는 한동안 백업으로 유지
+4. 원본 빌드 산출물은 공개 저장소 밖에서만 백업으로 유지
 
 ## 미해결 / 확장 여지
 

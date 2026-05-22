@@ -47,8 +47,9 @@ members.csv
 mapping.json
 mapping.*.json
 
-# === Legacy archive (v5 원본 보존) ===
-# 위 규칙들(dist/, build/, members.json 등)이 legacy 하위도 막기 때문에 전부 풀어줌
-!legacy/
-!legacy/**/
-!legacy/**
+# Legacy source is tracked, but generated artifacts and user data stay ignored.
+legacy/build/
+legacy/dist/
+legacy/**/members.json
+legacy/**/members.csv
+legacy/**/mapping.json

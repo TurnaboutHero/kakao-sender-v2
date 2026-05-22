@@ -1,8 +1,8 @@
 """원본 v5 의 `members.json` → v2 `members.csv` 마이그레이션.
 
 사용 예:
-    uv run python scripts/migrate.py ../kakao_sender/dist/members.json
-    uv run python scripts/migrate.py ../kakao_sender/dist/members.json --out data/members.csv
+    uv run python scripts/migrate.py path/to/members.json
+    uv run python scripts/migrate.py path/to/members.json --out data/members.csv
 
 각 이름을 `Member` 로 승격하면서 UUID 발급. `group`·`birthday` 등은 빈 값으로 두고
 이후 UI 또는 수작업으로 채운다.
