@@ -30,8 +30,9 @@ dist/
 *.swp
 *.swo
 
-# Claude Code 런타임 상태 (오케스트레이션 캐시)
+# Claude Code / Codex 런타임 상태 (오케스트레이션 캐시)
 .omc/
+.omx/
 
 # OS
 .DS_Store

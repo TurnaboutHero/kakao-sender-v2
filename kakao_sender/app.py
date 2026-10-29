@@ -12,9 +12,9 @@ import logging
 import threading
 import tkinter as tk
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import ClassVar
 
 from kakao_sender import config, logging_setup
@@ -25,6 +25,7 @@ from kakao_sender.engine.send import (
     SendOutcome,
     SendResult,
     retry_failed,
+    retry_jobs,
     send_batch,
 )
 from kakao_sender.roster import (
@@ -36,7 +37,11 @@ from kakao_sender.roster import (
     save_mapping,
     save_members,
 )
-from kakao_sender.roster.store import sorted_by_name
+from kakao_sender.roster.store import (
+    normalize_birthday,
+    normalize_phone_last4,
+    sorted_by_name,
+)
 
 _log = logging_setup.get_logger(__name__)
 
@@ -144,21 +149,23 @@ class MembersTab(tk.Frame):
         _btn(bar, "💾 저장", self._save, "green_bg", "green").pack(side="right")
 
         # Treeview
-        cols = ("name", "group", "birthday", "phone_last4", "active")
+        cols = ("name", "group", "birthday", "phone_last4", "active", "note")
         frame = tk.Frame(self, bg=COLORS["border"], padx=1, pady=1)
         frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
         self.tree.heading("name", text="이름")
-        self.tree.heading("group", text="요회")
+        self.tree.heading("group", text="그룹")
         self.tree.heading("birthday", text="생일")
         self.tree.heading("phone_last4", text="연락처 끝4")
         self.tree.heading("active", text="활성")
+        self.tree.heading("note", text="메모")
         self.tree.column("name", width=130, anchor="w")
-        self.tree.column("group", width=80, anchor="w")
-        self.tree.column("birthday", width=70, anchor="center")
-        self.tree.column("phone_last4", width=90, anchor="center")
-        self.tree.column("active", width=60, anchor="center")
+        self.tree.column("group", width=90, anchor="w")
+        self.tree.column("birthday", width=90, anchor="center")
+        self.tree.column("phone_last4", width=80, anchor="center")
+        self.tree.column("active", width=50, anchor="center")
+        self.tree.column("note", width=140, anchor="w")
         self.tree.pack(side="left", fill="both", expand=True)
 
         sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -176,7 +183,14 @@ class MembersTab(tk.Frame):
                 "",
                 "end",
                 iid=m.id,
-                values=(m.name, m.group, m.birthday, m.phone_last4, "✓" if m.active else "—"),
+                values=(
+                    m.name,
+                    m.group,
+                    m.birthday,
+                    m.phone_last4,
+                    "✓" if m.active else "—",
+                    m.note,
+                ),
             )
         active_cnt = sum(1 for m in self.app.members if m.active)
         self.count_lbl.config(
@@ -191,55 +205,97 @@ class MembersTab(tk.Frame):
         return sel[0] if sel else None
 
     def _add_member(self) -> None:
-        name = simpledialog.askstring("회원 추가", "이름:", parent=self.app.root)
-        if not name:
-            return
-        name = name.strip()
-        if any(m.name == name for m in self.app.members):
-            messagebox.showwarning("중복", f"'{name}'은 이미 등록됨.")
-            return
-        group = (
-            simpledialog.askstring("회원 추가", "요회/캠퍼스 (선택):", parent=self.app.root) or ""
-        )
-        birthday = (
-            simpledialog.askstring(
-                "회원 추가", "생일 (MM-DD 또는 YYYY-MM-DD, 선택):", parent=self.app.root
-            )
-            or ""
-        )
-        self.app.members.append(Member(name=name, group=group, birthday=birthday))
-        self.refresh()
+        self._member_form(None)
 
     def _edit_member(self) -> None:
         mid = self._selected_id()
         if not mid:
             return
         m = next((x for x in self.app.members if x.id == mid), None)
-        if m is None:
-            return
-        new_name = simpledialog.askstring(
-            "이름 수정", "이름:", initialvalue=m.name, parent=self.app.root
+        if m is not None:
+            self._member_form(m)
+
+    def _member_form(self, member: Member | None) -> None:
+        """회원 추가/수정 양식 한 장. 이름만 필수, 나머지는 비워도 됨."""
+        dialog = tk.Toplevel(self.app.root)
+        dialog.title("회원 수정" if member else "회원 추가")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.resizable(False, False)
+        dialog.transient(self.app.root)
+
+        form = tk.Frame(dialog, bg=COLORS["bg"])
+        form.pack(fill="both", padx=14, pady=(14, 6))
+
+        fields = (
+            ("name", "이름 *", member.name if member else "", ""),
+            ("group", "그룹", member.group if member else "", "기수·팀·캠퍼스 등 자유롭게"),
+            ("birthday", "생일", member.birthday if member else "", "03-15 또는 1999-03-15"),
+            ("phone_last4", "연락처 끝4", member.phone_last4 if member else "", "동명이인 구분용"),
+            ("note", "메모", member.note if member else "", ""),
         )
-        if new_name is None:
-            return
-        new_name = new_name.strip()
-        if not new_name:
-            messagebox.showwarning("오류", "이름은 비울 수 없음.")
-            return
-        new_group = (
-            simpledialog.askstring("요회 수정", "요회:", initialvalue=m.group, parent=self.app.root)
-            or ""
-        )
-        new_birthday = (
-            simpledialog.askstring(
-                "생일 수정", "생일 (MM-DD):", initialvalue=m.birthday, parent=self.app.root
+        vars_: dict[str, tk.StringVar] = {}
+        for row, (key, label, value, hint) in enumerate(fields):
+            tk.Label(form, text=label, font=F(10), bg=COLORS["bg"], fg=COLORS["txt"]).grid(
+                row=row, column=0, sticky="w", pady=3
             )
-            or ""
-        )
-        m.name = new_name
-        m.group = new_group
-        m.birthday = new_birthday
-        self.refresh()
+            vars_[key] = tk.StringVar(value=value)
+            entry = tk.Entry(form, textvariable=vars_[key], font=F(10), width=24)
+            entry.grid(row=row, column=1, sticky="we", padx=(8, 8), pady=3)
+            if key == "name":
+                entry.focus_set()
+            tk.Label(form, text=hint, font=F(8), bg=COLORS["bg"], fg=COLORS["sub"]).grid(
+                row=row, column=2, sticky="w"
+            )
+        active_var = tk.BooleanVar(value=member.active if member else True)
+        tk.Checkbutton(
+            form,
+            text="활성 (발송 대상에 포함)",
+            variable=active_var,
+            font=F(10),
+            bg=COLORS["bg"],
+            activebackground=COLORS["bg"],
+        ).grid(row=len(fields), column=1, sticky="w", pady=(6, 0))
+        tk.Label(
+            form, text="* 표시만 필수입니다.", font=F(8), bg=COLORS["bg"], fg=COLORS["sub"]
+        ).grid(row=len(fields) + 1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        def save() -> None:
+            name = vars_["name"].get().strip()
+            if not name:
+                messagebox.showwarning("오류", "이름은 비울 수 없음.", parent=dialog)
+                return
+            if any(m.name == name and m is not member for m in self.app.members):
+                messagebox.showwarning("중복", f"'{name}'은 이미 등록됨.", parent=dialog)
+                return
+            try:
+                birthday = normalize_birthday(vars_["birthday"].get())
+                phone_last4 = normalize_phone_last4(vars_["phone_last4"].get())
+            except ValueError as e:
+                messagebox.showwarning("입력 오류", str(e), parent=dialog)
+                return
+            values = {
+                "name": name,
+                "group": vars_["group"].get().strip(),
+                "birthday": birthday,
+                "phone_last4": phone_last4,
+                "note": vars_["note"].get().strip(),
+                "active": active_var.get(),
+            }
+            if member is None:
+                self.app.members.append(Member(**values))
+            else:
+                for key, value in values.items():
+                    setattr(member, key, value)
+            self.refresh()
+            dialog.destroy()
+
+        btn = tk.Frame(dialog, bg=COLORS["bg"])
+        btn.pack(fill="x", padx=14, pady=(4, 12))
+        _btn(btn, "확인", save, "yellow").pack(side="right")
+        _btn(btn, "취소", dialog.destroy, "red_bg", "red").pack(side="right", padx=(0, 4))
+        dialog.bind("<Return>", lambda _e: save())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.grab_set()
 
     def _delete_member(self) -> None:
         ids = list(self.tree.selection())
@@ -349,7 +405,7 @@ class MappingTab(tk.Frame):
             rowframe = tk.Frame(self._inner, bg=COLORS["white"])
             rowframe.pack(fill="x", padx=8, pady=2)
 
-            # 정식명 + 요회
+            # 정식명 + 그룹
             label_text = f"  {m.name}" + (f"  ({m.group})" if m.group else "")
             tk.Label(
                 rowframe,
@@ -450,6 +506,8 @@ def _mapping_state_color(val: str) -> str:
 class _SendUIState:
     is_running: bool = False
     last_results: list[SendResult] | None = None
+    # 이어보내기 이전 실행들에서 이미 성공한 결과 — 처음부터 재발송 시 중복 경고용
+    sent_before: list[SendResult] = field(default_factory=list)
 
 
 class SendTab(tk.Frame):
@@ -462,6 +520,8 @@ class SendTab(tk.Frame):
         self.image_var = tk.StringVar()
         self.use_variants_var = tk.BooleanVar(value=False)
         self.excluded_ids: set[str] = set()
+        self._total_planned = 1
+        self._prev_state: tuple[list[SendResult], list[SendResult]] = ([], [])
         self._build()
 
     def _build(self) -> None:
@@ -551,7 +611,9 @@ class SendTab(tk.Frame):
         self.stop_btn = _btn(ctrl_row, "■ 중지", self._stop, "disabled")
         self.stop_btn.pack(side="left", fill="x", expand=True)
         self.stop_btn.config(state="disabled")
-        self.retry_btn = _btn(ctrl_row, "↻ 실패자만 재시도", self._retry_failed, "red_bg", "red")
+        self.retry_btn = _btn(
+            ctrl_row, "↻ 실패·미발송 이어보내기", self._retry_failed, "red_bg", "red"
+        )
         self.retry_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self.retry_btn.config(state="disabled")
 
@@ -682,6 +744,22 @@ class SendTab(tk.Frame):
                 "대상 없음", "발송 대상이 없습니다. 명단/매핑/메시지를 확인하세요."
             )
             return
+        prior = self.state.last_results or []
+        already_sent = len(self.state.sent_before) + sum(
+            1 for r in prior if r.outcome == SendOutcome.SUCCESS
+        )
+        if (
+            already_sent
+            and retry_jobs(prior)
+            and not messagebox.askyesno(
+                "중복 발송 주의",
+                f"직전 발송에서 {already_sent}명은 이미 받았고, 끝나지 않은 사람이 남아 있습니다.\n"
+                "처음부터 다시 보내면 이미 받은 사람에게 한 번 더 갑니다.\n\n"
+                "남은 사람만 보내려면 '아니오' 후 '실패·미발송 이어보내기' 를 누르세요.\n"
+                "그래도 처음부터 보낼까요?",
+            )
+        ):
+            return
         if no_map and not messagebox.askyesno(
             "매핑 누락 확인",
             f"매핑 안 된 {len(no_map)}명은 자동 스킵됩니다.\n계속할까요?",
@@ -690,11 +768,12 @@ class SendTab(tk.Frame):
         if not messagebox.askyesno(
             "발송 확인",
             f"{len(jobs)}명에게 발송합니다.\n\n"
-            "✅ 친구 탭으로 자동 전환됨 (단톡방 결과 제거)\n"
-            "✅ 채팅창 제목 완전일치 검증 (단톡방 오발송 차단)\n"
-            "✅ 각 채팅창 HWND 직접 추적·닫기 (포커스 훔김 내성)\n\n"
-            "⚠️ 발송 중 카카오톡 창을 **닫지** 마세요.\n"
-            "   (다른 창 클릭·포커스 이동은 영향 없음)",
+            "☑️ 카카오톡이 '친구' 탭에 있어야 합니다 (자동 전환 안 됨 — 아니면 중단)\n"
+            "✅ 채팅창 제목이 카톡 저장명과 완전일치할 때만 발송\n"
+            "✅ 붙여넣기·전송 직전마다 대상 채팅창이 맨 앞인지 확인\n\n"
+            "⚠️ 발송 중에는 마우스·키보드를 쓰지 마세요.\n"
+            "   입력은 맨 앞 창으로 갑니다. 포커스가 바뀌면 발송을 멈추고,\n"
+            "   남은 사람은 '이어보내기' 로 다시 보낼 수 있습니다.",
         ):
             return
 
@@ -703,14 +782,20 @@ class SendTab(tk.Frame):
     def _retry_failed(self) -> None:
         if self.state.is_running or not self.state.last_results:
             return
-        failed_count = sum(1 for r in self.state.last_results if r.outcome == SendOutcome.FAILED)
-        if not failed_count:
-            messagebox.showinfo("재시도", "실패한 대상이 없습니다.")
-            return
-        if not messagebox.askyesno("재시도", f"실패한 {failed_count}명을 재시도합니다."):
-            return
-        # 상태를 워커에 넘기기 위해 별도 스레드
         prior = list(self.state.last_results)
+        pending = retry_jobs(prior)
+        if not pending:
+            messagebox.showinfo("이어보내기", "실패·미발송 대상이 없습니다.")
+            return
+        failed = sum(1 for r in prior if r.outcome == SendOutcome.FAILED)
+        stopped = sum(1 for r in prior if r.outcome == SendOutcome.STOPPED)
+        if not messagebox.askyesno(
+            "이어보내기",
+            f"실패 {failed}명 + 미발송 {stopped}명 = {len(pending)}명에게 보냅니다.\n"
+            "이미 받은 사람에게는 다시 보내지 않습니다.\n\n"
+            "⚠️ 카카오톡이 '친구' 탭인지 확인하고, 발송 중에는 마우스·키보드를 쓰지 마세요.",
+        ):
+            return
         self._start_worker(
             lambda client, controller, variants: retry_failed(
                 client,
@@ -718,7 +803,9 @@ class SendTab(tk.Frame):
                 controller=controller,
                 on_result=self._on_result,
                 message_variants=variants,
-            )
+            ),
+            total=len(pending),
+            carry_sent=[r for r in prior if r.outcome == SendOutcome.SUCCESS],
         )
 
     def _stop(self) -> None:
@@ -736,21 +823,34 @@ class SendTab(tk.Frame):
                 controller=controller,
                 on_result=self._on_result,
                 message_variants=variants,
-            )
+            ),
+            total=len(jobs),
         )
 
     def _start_worker(
         self,
         run: Callable[[KakaoClient, SendController, tuple[str, ...] | None], list[SendResult]],
+        *,
+        total: int,
+        carry_sent: list[SendResult] | None = None,
     ) -> None:
+        """워커 시작. `carry_sent` 는 이어보내기일 때 직전 실행의 성공 결과 (None = 새 배치).
+
+        실행이 아무것도 처리하지 못하고 실패하면 (`_worker_failed`) 직전 상태로 되돌린다 —
+        그러지 않으면 남은 사람 목록이 사라져 이어보내기도 중복 경고도 못 하게 된다.
+        """
+        self._prev_state = (list(self.state.last_results or []), list(self.state.sent_before))
+        if carry_sent is None:
+            self.state.sent_before = []
+        else:
+            self.state.sent_before = self.state.sent_before + carry_sent
         self.state.is_running = True
         self.state.last_results = []
         self.prog_var.set(0)
         self._set_running_ui(True)
         self.controller = SendController()
         variants = config.MESSAGES.birthday_default if self.use_variants_var.get() else None
-        self._total_planned = 0
-        self._processed = 0
+        self._total_planned = max(total, 1)
 
         def worker() -> None:
             try:
@@ -787,41 +887,51 @@ class SendTab(tk.Frame):
         else:
             _log.warning("%s %s — %s", _outcome_icon(result.outcome), display, result.reason)
 
-        # 진행률
-        if self.state.last_results:
-            # 총 예상치 = 처음 _eligible_jobs의 길이 (제외 전). 여기선 간략히 current count vs expected
-            done = len(self.state.last_results)
-            # 어림잡은 전체 대상 수로 나눔
-            total = max(done, self._guess_total())
-            self.prog_var.set(done / total * 100)
-            self.status_lbl.config(text=f"{done} / {total} 처리 중")
+        # 진행률 — 분모는 이번 실행의 대상 수 (_start_worker 에서 고정)
+        done = len(self.state.last_results)
+        total = max(done, self._total_planned)
+        self.prog_var.set(done / total * 100)
+        self.status_lbl.config(text=f"{done} / {total} 처리 중")
         # 탭 갱신은 생략 (복잡도 관리)
         _ = tag  # 로그 태깅은 로그 탭에서 레벨로 자동 처리
-
-    def _guess_total(self) -> int:
-        """진행률 추정용. 정확하지 않아도 UX상 지장 없음."""
-        jobs, _, _ = self._eligible_jobs()
-        return len(jobs) or 1
 
     def _worker_done(self, results: list[SendResult]) -> None:
         self.state.is_running = False
         self._set_running_ui(False)
         succeeded = sum(1 for r in results if r.outcome == SendOutcome.SUCCESS)
         failed = sum(1 for r in results if r.outcome == SendOutcome.FAILED)
+        stopped = sum(1 for r in results if r.outcome == SendOutcome.STOPPED)
         self.prog_var.set(100)
         self.status_lbl.config(
-            text=f"완료 — 성공 {succeeded}, 실패 {failed}",
-            fg=COLORS["green"] if not failed else COLORS["red"],
+            text=f"완료 — 성공 {succeeded}, 실패 {failed}, 미발송 {stopped}",
+            fg=COLORS["green"] if not (failed or stopped) else COLORS["red"],
         )
-        if failed:
-            self.retry_btn.config(state="normal")
-        messagebox.showinfo("발송 완료", f"성공 {succeeded}명 / 실패 {failed}명")
+        self._update_retry_button()
+        summary = f"성공 {succeeded}명 / 실패 {failed}명 / 미발송 {stopped}명"
+        abort = next((r for r in results if r.aborts_batch), None)
+        if abort is not None:
+            messagebox.showwarning(
+                "발송 중단",
+                f"{summary}\n\n중단 사유: {abort.reason}\n\n"
+                "원인을 정리한 뒤 '실패·미발송 이어보내기' 로 남은 사람에게 보내세요.",
+            )
+        else:
+            messagebox.showinfo("발송 완료", summary)
 
     def _worker_failed(self, message: str) -> None:
         self.state.is_running = False
         self._set_running_ui(False)
         self.status_lbl.config(text=f"오류 — {message}", fg=COLORS["red"])
+        if not self.state.last_results:
+            # 카톡 창 못 찾음 등으로 아무것도 처리 못 함 — 직전 상태(남은 사람 목록) 복원
+            self.state.last_results, self.state.sent_before = self._prev_state
+        # 남은 사람은 이어보내기로 — 처음부터 다시 돌리면 중복 발송
+        self._update_retry_button()
         messagebox.showerror("발송 실패", message)
+
+    def _update_retry_button(self) -> None:
+        pending = retry_jobs(self.state.last_results or [])
+        self.retry_btn.config(state="normal" if pending else "disabled")
 
     def _set_running_ui(self, running: bool) -> None:
         if running:

@@ -60,9 +60,16 @@ UIA 는 **입력창 `AutomationId='1006'`** 발견 등 보조 경로로 존재�
 
 v2 의 **존재 이유**. 아래 3층 모두 통과해야 실제 발송:
 
-1. **친구 탭 강제** — `switch_to_friend_tab()` 후 `get_active_main_tab(main_hwnd)` 로 visibility 검증. 실패 시 즉시 예외. 채팅 탭 검색은 단톡방/1:1/친구 혼재 결과를 내므로 금지.
+1. **친구 탭 확인** — `require_friend_tab()` 이 `get_active_main_tab(main_hwnd)` 로 활성 탭을 판정. 자동 전환은 하지 않고 친구 탭이 아니면 즉시 예외 (사용자가 직접 전환). 채팅 탭 검색은 단톡방/1:1/친구 혼재 결과를 내므로 금지.
 2. **HWND 스냅샷 diff** — 검색 + Enter + Alt+Enter 전후의 `EVA_Window_Dblclk` 집합 차이로 새 채팅창 HWND 를 식별. 포커스가 다른 창으로 가도 타겟 특정 가능.
 3. **제목 완전일치** — `detection.verify_target_title` 은 `a.strip() == e.strip()` 만 성공. 부분일치 금지 — 단톡방 제목이 회원 이름을 포함할 수 있어 오발송 위험.
+
+**입력 단계 방어 (3중 방어 이후)**: 위 3층은 "올바른 창을 열었는지" 만 보장한다. 실제 입력(`Ctrl+V`·`Enter`)은 pyautogui 라 HWND 지정이 안 되고 **맨 앞 창으로 간다**. 그래서:
+
+- 검색어 붙여넣기 · 검색 결과 Enter · 메시지/이미지 붙여넣기 · 메시지 Enter 직전마다 `_require_foreground(hwnd)` — 맨 앞 창이 대상이 아니면 키를 보내지 않고 `KakaoFocusError`
+- 메시지는 붙여넣은 뒤 `WM_GETTEXT` 로 **이 채팅창 입력창에 들어갔는지** 확인한 후에만 Enter (`detection.pasted_text_present`, 공백·이모지 정규화 비교)
+- 입력창에 이전 시도의 텍스트가 남아있으면 붙여넣기 전에 비운다 (이어 붙은 메시지 방지)
+- 탭·포커스 오류는 배치 전체를 멈춘다 (`SendResult.aborts_batch`) — 사용자가 PC 를 쓰는 중이므로 계속하면 위험
 
 불일치 시 `PostMessage(new_chat_hwnd, WM_CLOSE)` 로 HWND 를 직접 지정해 닫고 실패로 기록. `Ctrl+W` (포그라운드 창 닫기) 는 **쓰지 않음** — 엉뚱한 창을 닫을 여지 있음.
 
@@ -88,7 +95,11 @@ rest_duration: float = 45.0
 
 ### D6. 재시도는 1급 기능
 
-`SendResult` 를 보존하고 `retry_failed()` 로 **실패자만** 다시 돌린다. 원본은 실패자를 로그에만 남기고 담당자가 수기로 재발송해야 했다. 100명 규모 배치에서 3명 누락은 항상 있고, 수기 재발송은 실수 원인.
+`SendResult` 를 보존하고 `retry_failed()` 로 **실패(FAILED)·미발송(STOPPED)자만** 이어보낸다. 원본은 실패자를 로그에만 남기고 담당자가 수기로 재발송해야 했다. 100명 규모 배치에서 3명 누락은 항상 있고, 수기 재발송은 실수 원인.
+
+- `send_batch` 는 중단(사용자 중지·탭/포커스 오류)돼도 **모든 job 에 결과를 하나씩** 남긴다. 남은 사람은 STOPPED. 예외로 결과를 잃지 않는다.
+- 이미지는 나가고 텍스트만 실패한 건은 `image_sent=True` — 이어보낼 때 이미지를 빼고 텍스트만 보낸다.
+- UI 는 끝나지 않은 배치가 있는데 "발송 시작" 을 누르면 중복 발송 경고를 띄운다.
 
 ### D7. 데이터는 커밋하지 않는다
 

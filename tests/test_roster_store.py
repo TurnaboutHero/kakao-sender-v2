@@ -11,6 +11,8 @@ from kakao_sender.roster.store import (
     Member,
     load_members,
     load_members_from_legacy_json,
+    normalize_birthday,
+    normalize_phone_last4,
     save_members,
     sorted_by_name,
 )
@@ -32,8 +34,8 @@ def test_member_rejects_empty_name() -> None:
 def test_roundtrip_save_load(tmp_path: Path) -> None:
     csv_path = tmp_path / "members.csv"
     original = [
-        Member(name="회원가", group="A요회", birthday="03-15"),
-        Member(name="회원나", group="B요회", birthday="11-02", phone_last4="1234", active=False),
+        Member(name="회원가", group="1기", birthday="03-15"),
+        Member(name="회원나", group="2기", birthday="11-02", phone_last4="1234", active=False),
         Member(name="회원다", note="해외 거주"),
     ]
     save_members(original, csv_path)
@@ -44,7 +46,7 @@ def test_roundtrip_save_load(tmp_path: Path) -> None:
     assert names == {"회원가", "회원나", "회원다"}
 
     jinseo = next(m for m in loaded if m.name == "회원나")
-    assert jinseo.group == "B요회"
+    assert jinseo.group == "2기"
     assert jinseo.birthday == "11-02"
     assert jinseo.phone_last4 == "1234"
     assert jinseo.active is False
@@ -101,3 +103,37 @@ def test_sorted_by_name_is_stable_ko() -> None:
     sorted_names = [m.name for m in sorted_by_name(members)]
     # 한글 기본 정렬: 가나다 순
     assert sorted_names == ["가회원", "나회원", "다회원"]
+
+
+# ── 선택 항목 정규화 ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", ""),
+        ("  ", ""),
+        ("03-15", "03-15"),
+        ("3-5", "03-05"),
+        ("3/15", "03-15"),
+        ("02-29", "02-29"),  # 연도 없는 생일은 윤일 허용
+        ("1999.3.15", "1999-03-15"),
+        ("2000-02-29", "2000-02-29"),
+    ],
+)
+def test_normalize_birthday_accepts(raw: str, expected: str) -> None:
+    assert normalize_birthday(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["13-01", "02-30", "1999-02-29", "99-03-15", "3월15일", "0315"])
+def test_normalize_birthday_rejects(raw: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_birthday(raw)
+
+
+def test_normalize_phone_last4() -> None:
+    assert normalize_phone_last4("") == ""
+    assert normalize_phone_last4(" 1234 ") == "1234"
+    for bad in ("123", "12345", "12a4"):
+        with pytest.raises(ValueError):
+            normalize_phone_last4(bad)

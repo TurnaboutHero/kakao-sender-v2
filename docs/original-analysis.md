@@ -30,7 +30,7 @@ def is_chat_input_ready():
 ### 2. 오발송 방지 메커니즘 전무
 
 ```python
-pyautogui.press("enter")       # 검색 첫 결과 맹목 선택
+pyautogui.press("enter")  # 검색 첫 결과 맹목 선택
 pyautogui.hotkey("alt", "enter")  # 1:1 채팅 열기
 ```
 

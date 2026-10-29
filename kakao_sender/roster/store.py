@@ -3,7 +3,7 @@
 원본은 `members.json`에 이름 문자열 리스트만 저장했다. 이 버전은:
 
 - 안정적 `id` (UUID) — 이름이 바뀌어도 매핑이 유지되도록
-- `group`, `birthday`, `phone_last4` 등 생일 워크플로에 필요한 메타
+- `group`(그룹 구분), `birthday`, `phone_last4`, `note` 등 선택 메타 — 이름 외엔 비워도 됨
 - CSV로 저장 → Excel/Google Sheets와 호환
 
 `load_members_from_legacy_json()` 로 원본 `members.json` 이름 리스트를 흡수 가능.
@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 
 from kakao_sender import config, logging_setup
@@ -38,7 +40,7 @@ class Member:
     """명단 1행."""
 
     name: str
-    group: str = ""
+    group: str = ""  # 그룹 구분 (기수·팀·캠퍼스 등 자유 텍스트)
     birthday: str = ""  # "MM-DD" 권장, "YYYY-MM-DD" 허용
     phone_last4: str = ""
     active: bool = True
@@ -53,6 +55,39 @@ class Member:
         self.note = self.note.strip()
         if not self.name:
             raise ValueError("Member.name is empty")
+
+
+def normalize_birthday(text: str) -> str:
+    """생일 입력을 `MM-DD` / `YYYY-MM-DD` 로 정규화. 빈 입력은 "" (선택 항목).
+
+    `3-15`, `03/15`, `1999.3.15` 처럼 구분자·자릿수가 섞여도 받아들인다.
+    존재하지 않는 날짜는 ValueError.
+    """
+    raw = text.strip()
+    if not raw:
+        return ""
+    parts = re.split(r"[-/.]", raw)
+    if not all(p.isdigit() for p in parts) or len(parts) not in (2, 3):
+        raise ValueError(f"생일 형식 오류: {raw!r} (예: 03-15 또는 1999-03-15)")
+    nums = [int(p) for p in parts]
+    year = nums[0] if len(nums) == 3 else 2000  # MM-DD 는 윤년 기준으로 검사 (02-29 허용)
+    month, day = nums[-2:]
+    if len(nums) == 3 and len(parts[0]) != 4:
+        raise ValueError(f"생일 연도는 4자리: {raw!r}")
+    try:
+        date(year, month, day)
+    except ValueError:
+        raise ValueError(f"존재하지 않는 날짜: {raw!r}") from None
+    md = f"{month:02d}-{day:02d}"
+    return f"{year:04d}-{md}" if len(nums) == 3 else md
+
+
+def normalize_phone_last4(text: str) -> str:
+    """연락처 끝 4자리. 빈 입력은 "" (선택 항목), 그 외는 숫자 4개만 허용."""
+    raw = text.strip()
+    if raw and not (len(raw) == 4 and raw.isdigit()):
+        raise ValueError(f"연락처 끝 4자리는 숫자 4개: {raw!r}")
+    return raw
 
 
 def _to_row(m: Member) -> dict[str, str]:
