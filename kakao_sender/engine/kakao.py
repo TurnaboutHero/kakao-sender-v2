@@ -2,10 +2,11 @@
 
 설계 원칙:
 - win32 `EnumWindows` / `EnumChildWindows` 주력. UIA 거의 안 씀.
-- 채팅창은 **HWND 스냅샷 diff** 로 추적. `GetForegroundWindow` 의존 제거.
-- 텍스트는 `SendMessage(WM_SETTEXT)` + `PostMessage(WM_KEYDOWN, VK_RETURN)` 로 RichEdit 에 직접 주입. 클립보드·pyautogui 불필요.
-- 이미지는 클립보드 DIB 경로 유지 (포맷 복잡도). `SetFocus(richedit_hwnd)` 로 수신 창 명시.
-- 탭 전환은 `Ctrl+1/2` 핫키 + `get_active_main_tab` rect 검증.
+- 채팅창은 **HWND 스냅샷 diff** 로 추적해 대상 창을 특정한다.
+- 텍스트·이미지 입력은 클립보드 + `Ctrl+V` + `Enter` (WM_SETTEXT 는 카톡 반자동화 감지에 걸림).
+  키 입력은 **맨 앞 창으로 가므로** 붙여넣기·Enter 직전마다 `_require_foreground` 로
+  대상 HWND 가 맨 앞인지 확인하고, 아니면 `KakaoFocusError` 로 중단한다.
+- 탭 전환은 자동으로 하지 않음 (`require_friend_tab` 은 확인만).
 - 채팅창 닫기는 `PostMessage(chat_hwnd, WM_CLOSE)` — 포그라운드 의존 없음.
 
 각 primitive 는 "성공 시 None, 실패 시 KakaoError" 계약.
@@ -187,19 +188,8 @@ class KakaoClient:
         current = _get_richedit_text(search_hwnd)
         _log.info("search HWND=%s, 기존 내용=%r", hex(search_hwnd), current[:40])
 
-        # 3) 표준 Edit 명령: 전체 선택 후 삭제
-        _EM_SETSEL = 0x00B1
-        try:
-            win32gui.SendMessage(search_hwnd, _EM_SETSEL, 0, -1)
-            win32gui.SendMessage(search_hwnd, win32con.WM_CLEAR, 0, 0)
-        except Exception as e:
-            _log.debug("EM_SETSEL/WM_CLEAR 실패: %s", e)
-
-        # 4) 방어적 WM_SETTEXT ""
-        try:
-            win32gui.SendMessage(search_hwnd, win32con.WM_SETTEXT, 0, "")
-        except Exception as e:
-            _log.debug('WM_SETTEXT "" 실패: %s', e)
+        # 3~4) 전체 선택 후 삭제 + 방어적 WM_SETTEXT ""
+        _clear_edit(search_hwnd)
 
         after_clear = _get_richedit_text(search_hwnd)
         _log.info("search HWND=%s, clear 후=%r", hex(search_hwnd), after_clear[:40])
@@ -212,6 +202,7 @@ class KakaoClient:
 
         _set_clipboard_text(query)
         time.sleep(0.05)
+        _require_foreground(self.main_hwnd, "검색어 붙여넣기")
         pyautogui.hotkey("ctrl", "v")
         time.sleep(config.TIMING.after_search_input)
 
@@ -235,6 +226,7 @@ class KakaoClient:
         """
         before = windows.snapshot_chat_hwnds()
 
+        _require_foreground(self.main_hwnd, "검색 결과 열기")
         pyautogui.press("enter")
         time.sleep(config.TIMING.after_enter)
         pyautogui.hotkey("alt", "enter")
@@ -293,39 +285,77 @@ class KakaoClient:
         따라서 텍스트도 이미지와 같은 **클립보드 + Ctrl+V** 경로로 통일한다.
         단 RichEdit HWND 에 `SetFocus` 로 수신 대상 명시.
 
-        전송 후 RichEdit 가 비었는지 검증해 false positive (전송 실패를 성공으로
-        보고) 를 방지.
+        Ctrl+V / Enter 는 맨 앞 창으로 가므로 두 단계 모두 직전에 채팅창이 맨 앞인지
+        확인하고, 붙여넣은 텍스트가 **이 채팅창의 입력창에 실제로 들어갔는지** 확인한 뒤에만
+        Enter 를 누른다. 전송 후에는 보낸 텍스트가 입력창에 남아있는지 검증해
+        false positive (전송 실패를 성공으로 보고) 를 방지.
         """
         if not text:
             return
         chat = self._require_current_chat()
         if chat.richedit_hwnd is None:
             raise KakaoError("입력창(RichEdit) HWND 없음 — open_friend_chat 먼저 호출")
+        richedit = chat.richedit_hwnd
 
         # 1) 채팅창 포그라운드 + RichEdit 포커스 (Ctrl+V 수신 대상 명확화)
         _force_foreground(chat.hwnd)
         time.sleep(config.TIMING.focus_settle)
         with contextlib.suppress(Exception):
-            win32gui.SendMessage(chat.richedit_hwnd, win32con.WM_SETFOCUS, 0, 0)
+            win32gui.SendMessage(richedit, win32con.WM_SETFOCUS, 0, 0)
 
-        # 2) 클립보드에 텍스트 넣기
+        # 2) 입력창에 남은 내용이 있으면 제거 — 이전 시도에서 전송 안 된 텍스트 뒤에
+        #    붙여넣으면 두 번 이어 붙은 메시지가 나간다. 빈 입력창은 placeholder 를 돌려줌.
+        existing = _get_richedit_text(richedit)
+        if not detection.is_input_empty(existing):
+            _log.warning("입력창에 남은 내용 제거: %r", existing[:40])
+            _clear_edit(richedit)
+            leftover = _get_richedit_text(richedit)
+            if not detection.is_input_empty(leftover):
+                raise KakaoError(
+                    f"입력창의 남은 내용을 지우지 못함 ({leftover[:40]!r}) — 이어 붙은 "
+                    "메시지가 나갈 수 있어 전송하지 않음. 채팅창 입력창을 직접 비워 주세요."
+                )
+
+        # 3) 클립보드에 텍스트 넣기
         _set_clipboard_text(text)
         time.sleep(0.05)
 
-        # 3) Ctrl+V → 입력 이벤트로 감지됨 → 전송 버튼 활성화
+        # 4) Ctrl+V → 입력 이벤트로 감지됨 → 전송 버튼 활성화
+        before = _get_richedit_text(richedit)
+        _require_foreground(chat.hwnd, "메시지 붙여넣기")
         pyautogui.hotkey("ctrl", "v")
         time.sleep(config.TIMING.after_ctrl_v_text)
 
-        # 4) Enter 로 전송
+        # 5) 붙여넣기가 이 입력창에 들어갔는지 확인 — 다른 창으로 샜으면 Enter 금지
+        pasted = detection.wait_until(
+            lambda: detection.pasted_text_present(text, before, _get_richedit_text(richedit)),
+            timeout=config.TIMING.wait_paste_confirm,
+            interval=config.TIMING.poll_interval,
+        )
+        if not pasted:
+            # 대개 포커스가 다른 창으로 간 경우 — 그 창 입력창에 텍스트가 들어갔을 수 있어
+            # 계속 진행하면 위험. KakaoFocusError 로 배치 전체를 멈춘다.
+            raise KakaoFocusError(
+                "붙여넣기 확인 실패 — 입력창에 메시지가 들어가지 않음 "
+                f"(현재={_get_richedit_text(richedit)[:80]!r}). 전송하지 않음."
+            )
+
+        # 6) Enter 로 전송
+        _require_foreground(chat.hwnd, "메시지 전송(Enter)")
         pyautogui.press("enter")
         time.sleep(config.TIMING.after_send_text)
 
-        # 5) 전송 확인 — 우리가 보낸 텍스트가 RichEdit 에 남아있는지.
+        # 7) 전송 확인 — 우리가 보낸 텍스트가 RichEdit 에 남아있는지.
         # "비었는지" 로 판정하면 카톡이 빈 입력창에 보여주는 placeholder
         # ("메시지 입력") 를 내용으로 오판함. 보낸 텍스트 자체가 남아있는지만 본다.
-        remaining = _get_richedit_text(chat.richedit_hwnd)
-        sent = text.strip()
-        if sent and sent in remaining:
+        #    카톡이 입력창을 늦게 비우면 실패로 오판 → 이어보내기 때 중복 발송되므로 폴링.
+        cleared = detection.wait_until(
+            lambda: not detection.text_left_in_input(text, _get_richedit_text(richedit)),
+            timeout=config.TIMING.wait_send_confirm,
+            interval=config.TIMING.poll_interval,
+        )
+        if not cleared:
+            remaining = _get_richedit_text(richedit)
             raise KakaoError(
                 f"텍스트 전송 실패 — 보낸 내용이 아직 입력창에 남아있음: {remaining[:80]!r}. "
                 "카톡 반자동화 감지 또는 '엔터 키로 메시지 전송' 설정 확인 필요."
@@ -360,12 +390,18 @@ class KakaoClient:
         _force_foreground(chat.hwnd)
         time.sleep(config.TIMING.focus_settle)
 
-        # 3) Ctrl+V → 카톡 미리보기 다이얼로그가 뜸
+        # 3) Ctrl+V → 카톡 미리보기 다이얼로그가 뜸.
         _log.debug("이미지 paste: %s (%d bytes)", path.name, size_bytes)
+        existing_chats = windows.snapshot_chat_hwnds()
+        _require_foreground(chat.hwnd, "이미지 붙여넣기")
         pyautogui.hotkey("ctrl", "v")
         time.sleep(config.TIMING.after_ctrl_v_image)
 
-        # 4) Enter → 다이얼로그 확인, 업로드 시작
+        # 4) Enter → 다이얼로그 확인, 업로드 시작.
+        #    Enter 는 미리보기 다이얼로그(붙여넣기 후 새로 뜬 창)로 가야 하므로 채팅창과
+        #    같을 필요는 없다. 대신 카톡 밖의 창이거나, 붙여넣기 전부터 열려 있던
+        #    **다른** 채팅창이면 Enter 를 보내지 않는다 (그 창의 입력 내용이 나갈 수 있음).
+        _require_image_confirm_target(chat.hwnd, existing_chats | {self.main_hwnd})
         pyautogui.press("enter")
 
         # 5) 업로드 완료 대기 (파일 크기 비례). 이 시간이 너무 짧으면 close 가
@@ -421,6 +457,75 @@ def _force_foreground(hwnd: int) -> None:
         if attached:
             with contextlib.suppress(Exception):
                 win32process.AttachThreadInput(current_thread, fg_thread, False)
+
+
+def _require_foreground(hwnd: int, action: str) -> None:
+    """pyautogui 키 입력 직전 호출 — 맨 앞 창이 `hwnd` 가 아니면 `KakaoFocusError`.
+
+    pyautogui 의 키 입력은 HWND 를 지정할 수 없고 맨 앞 창으로 간다. 사용자가 발송 중
+    다른 채팅방을 클릭하면 그 방으로 붙여넣기·전송이 가므로, 입력 직전마다 확인한다.
+    """
+    foreground = win32gui.GetForegroundWindow()
+    if foreground != hwnd:
+        raise KakaoFocusError(
+            f"{action} 직전 맨 앞 창이 대상이 아님 "
+            f"(기대={hex(hwnd)}, 실제={hex(foreground or 0)} "
+            f"{_safe_window_text(foreground)!r}). 키 입력을 보내지 않음."
+        )
+
+
+def _require_image_confirm_target(chat_hwnd: int, existing_chats: set[int]) -> None:
+    """이미지 미리보기 확인 Enter 직전 — 맨 앞 창이 카톡 프로세스의 창이고, 다른 채팅창이
+    아닌지 확인. 미리보기 다이얼로그는 붙여넣기 후 생겨서 `existing_chats` 에 없다.
+    """
+    foreground = win32gui.GetForegroundWindow()
+    if foreground == chat_hwnd:
+        return
+    if foreground in existing_chats:
+        raise KakaoFocusError(
+            f"이미지 전송(Enter) 직전 맨 앞 창이 다른 채팅창 "
+            f"({_safe_window_text(foreground)!r}). 키 입력을 보내지 않음."
+        )
+    if _window_pid(foreground) != _window_pid(chat_hwnd):
+        raise KakaoFocusError(
+            f"이미지 전송(Enter) 직전 맨 앞 창이 카톡이 아님 "
+            f"({_safe_window_text(foreground)!r}). 키 입력을 보내지 않음."
+        )
+
+
+def _window_pid(hwnd: int) -> int:
+    if not hwnd:
+        return 0
+    try:
+        return win32process.GetWindowThreadProcessId(hwnd)[1]
+    except Exception:
+        return 0
+
+
+def _safe_window_text(hwnd: int) -> str:
+    if not hwnd:
+        return ""
+    try:
+        return win32gui.GetWindowText(hwnd)
+    except Exception:
+        return ""
+
+
+def _clear_edit(hwnd: int) -> None:
+    """표준 Edit 메시지로 내용 비우기 — 포커스 무관 (Phase 3-2 ⑤ 실측 경로).
+
+    `EM_SETSEL(0, -1)` 전체 선택 + `WM_CLEAR` 삭제 후 방어적 `WM_SETTEXT ""`.
+    """
+    _EM_SETSEL = 0x00B1
+    try:
+        win32gui.SendMessage(hwnd, _EM_SETSEL, 0, -1)
+        win32gui.SendMessage(hwnd, win32con.WM_CLEAR, 0, 0)
+    except Exception as e:
+        _log.debug("EM_SETSEL/WM_CLEAR 실패: %s", e)
+    try:
+        win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, "")
+    except Exception as e:
+        _log.debug('WM_SETTEXT "" 실패: %s', e)
 
 
 def _post_key(hwnd: int, vk: int) -> None:

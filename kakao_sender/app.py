@@ -12,7 +12,7 @@ import logging
 import threading
 import tkinter as tk
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import ClassVar
@@ -25,6 +25,7 @@ from kakao_sender.engine.send import (
     SendOutcome,
     SendResult,
     retry_failed,
+    retry_jobs,
     send_batch,
 )
 from kakao_sender.roster import (
@@ -450,6 +451,8 @@ def _mapping_state_color(val: str) -> str:
 class _SendUIState:
     is_running: bool = False
     last_results: list[SendResult] | None = None
+    # 이어보내기 이전 실행들에서 이미 성공한 결과 — 처음부터 재발송 시 중복 경고용
+    sent_before: list[SendResult] = field(default_factory=list)
 
 
 class SendTab(tk.Frame):
@@ -462,6 +465,8 @@ class SendTab(tk.Frame):
         self.image_var = tk.StringVar()
         self.use_variants_var = tk.BooleanVar(value=False)
         self.excluded_ids: set[str] = set()
+        self._total_planned = 1
+        self._prev_state: tuple[list[SendResult], list[SendResult]] = ([], [])
         self._build()
 
     def _build(self) -> None:
@@ -551,7 +556,9 @@ class SendTab(tk.Frame):
         self.stop_btn = _btn(ctrl_row, "■ 중지", self._stop, "disabled")
         self.stop_btn.pack(side="left", fill="x", expand=True)
         self.stop_btn.config(state="disabled")
-        self.retry_btn = _btn(ctrl_row, "↻ 실패자만 재시도", self._retry_failed, "red_bg", "red")
+        self.retry_btn = _btn(
+            ctrl_row, "↻ 실패·미발송 이어보내기", self._retry_failed, "red_bg", "red"
+        )
         self.retry_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
         self.retry_btn.config(state="disabled")
 
@@ -682,6 +689,22 @@ class SendTab(tk.Frame):
                 "대상 없음", "발송 대상이 없습니다. 명단/매핑/메시지를 확인하세요."
             )
             return
+        prior = self.state.last_results or []
+        already_sent = len(self.state.sent_before) + sum(
+            1 for r in prior if r.outcome == SendOutcome.SUCCESS
+        )
+        if (
+            already_sent
+            and retry_jobs(prior)
+            and not messagebox.askyesno(
+                "중복 발송 주의",
+                f"직전 발송에서 {already_sent}명은 이미 받았고, 끝나지 않은 사람이 남아 있습니다.\n"
+                "처음부터 다시 보내면 이미 받은 사람에게 한 번 더 갑니다.\n\n"
+                "남은 사람만 보내려면 '아니오' 후 '실패·미발송 이어보내기' 를 누르세요.\n"
+                "그래도 처음부터 보낼까요?",
+            )
+        ):
+            return
         if no_map and not messagebox.askyesno(
             "매핑 누락 확인",
             f"매핑 안 된 {len(no_map)}명은 자동 스킵됩니다.\n계속할까요?",
@@ -690,11 +713,12 @@ class SendTab(tk.Frame):
         if not messagebox.askyesno(
             "발송 확인",
             f"{len(jobs)}명에게 발송합니다.\n\n"
-            "✅ 친구 탭으로 자동 전환됨 (단톡방 결과 제거)\n"
-            "✅ 채팅창 제목 완전일치 검증 (단톡방 오발송 차단)\n"
-            "✅ 각 채팅창 HWND 직접 추적·닫기 (포커스 훔김 내성)\n\n"
-            "⚠️ 발송 중 카카오톡 창을 **닫지** 마세요.\n"
-            "   (다른 창 클릭·포커스 이동은 영향 없음)",
+            "☑️ 카카오톡이 '친구' 탭에 있어야 합니다 (자동 전환 안 됨 — 아니면 중단)\n"
+            "✅ 채팅창 제목이 카톡 저장명과 완전일치할 때만 발송\n"
+            "✅ 붙여넣기·전송 직전마다 대상 채팅창이 맨 앞인지 확인\n\n"
+            "⚠️ 발송 중에는 마우스·키보드를 쓰지 마세요.\n"
+            "   입력은 맨 앞 창으로 갑니다. 포커스가 바뀌면 발송을 멈추고,\n"
+            "   남은 사람은 '이어보내기' 로 다시 보낼 수 있습니다.",
         ):
             return
 
@@ -703,14 +727,20 @@ class SendTab(tk.Frame):
     def _retry_failed(self) -> None:
         if self.state.is_running or not self.state.last_results:
             return
-        failed_count = sum(1 for r in self.state.last_results if r.outcome == SendOutcome.FAILED)
-        if not failed_count:
-            messagebox.showinfo("재시도", "실패한 대상이 없습니다.")
-            return
-        if not messagebox.askyesno("재시도", f"실패한 {failed_count}명을 재시도합니다."):
-            return
-        # 상태를 워커에 넘기기 위해 별도 스레드
         prior = list(self.state.last_results)
+        pending = retry_jobs(prior)
+        if not pending:
+            messagebox.showinfo("이어보내기", "실패·미발송 대상이 없습니다.")
+            return
+        failed = sum(1 for r in prior if r.outcome == SendOutcome.FAILED)
+        stopped = sum(1 for r in prior if r.outcome == SendOutcome.STOPPED)
+        if not messagebox.askyesno(
+            "이어보내기",
+            f"실패 {failed}명 + 미발송 {stopped}명 = {len(pending)}명에게 보냅니다.\n"
+            "이미 받은 사람에게는 다시 보내지 않습니다.\n\n"
+            "⚠️ 카카오톡이 '친구' 탭인지 확인하고, 발송 중에는 마우스·키보드를 쓰지 마세요.",
+        ):
+            return
         self._start_worker(
             lambda client, controller, variants: retry_failed(
                 client,
@@ -718,7 +748,9 @@ class SendTab(tk.Frame):
                 controller=controller,
                 on_result=self._on_result,
                 message_variants=variants,
-            )
+            ),
+            total=len(pending),
+            carry_sent=[r for r in prior if r.outcome == SendOutcome.SUCCESS],
         )
 
     def _stop(self) -> None:
@@ -736,21 +768,34 @@ class SendTab(tk.Frame):
                 controller=controller,
                 on_result=self._on_result,
                 message_variants=variants,
-            )
+            ),
+            total=len(jobs),
         )
 
     def _start_worker(
         self,
         run: Callable[[KakaoClient, SendController, tuple[str, ...] | None], list[SendResult]],
+        *,
+        total: int,
+        carry_sent: list[SendResult] | None = None,
     ) -> None:
+        """워커 시작. `carry_sent` 는 이어보내기일 때 직전 실행의 성공 결과 (None = 새 배치).
+
+        실행이 아무것도 처리하지 못하고 실패하면 (`_worker_failed`) 직전 상태로 되돌린다 —
+        그러지 않으면 남은 사람 목록이 사라져 이어보내기도 중복 경고도 못 하게 된다.
+        """
+        self._prev_state = (list(self.state.last_results or []), list(self.state.sent_before))
+        if carry_sent is None:
+            self.state.sent_before = []
+        else:
+            self.state.sent_before = self.state.sent_before + carry_sent
         self.state.is_running = True
         self.state.last_results = []
         self.prog_var.set(0)
         self._set_running_ui(True)
         self.controller = SendController()
         variants = config.MESSAGES.birthday_default if self.use_variants_var.get() else None
-        self._total_planned = 0
-        self._processed = 0
+        self._total_planned = max(total, 1)
 
         def worker() -> None:
             try:
@@ -787,41 +832,51 @@ class SendTab(tk.Frame):
         else:
             _log.warning("%s %s — %s", _outcome_icon(result.outcome), display, result.reason)
 
-        # 진행률
-        if self.state.last_results:
-            # 총 예상치 = 처음 _eligible_jobs의 길이 (제외 전). 여기선 간략히 current count vs expected
-            done = len(self.state.last_results)
-            # 어림잡은 전체 대상 수로 나눔
-            total = max(done, self._guess_total())
-            self.prog_var.set(done / total * 100)
-            self.status_lbl.config(text=f"{done} / {total} 처리 중")
+        # 진행률 — 분모는 이번 실행의 대상 수 (_start_worker 에서 고정)
+        done = len(self.state.last_results)
+        total = max(done, self._total_planned)
+        self.prog_var.set(done / total * 100)
+        self.status_lbl.config(text=f"{done} / {total} 처리 중")
         # 탭 갱신은 생략 (복잡도 관리)
         _ = tag  # 로그 태깅은 로그 탭에서 레벨로 자동 처리
-
-    def _guess_total(self) -> int:
-        """진행률 추정용. 정확하지 않아도 UX상 지장 없음."""
-        jobs, _, _ = self._eligible_jobs()
-        return len(jobs) or 1
 
     def _worker_done(self, results: list[SendResult]) -> None:
         self.state.is_running = False
         self._set_running_ui(False)
         succeeded = sum(1 for r in results if r.outcome == SendOutcome.SUCCESS)
         failed = sum(1 for r in results if r.outcome == SendOutcome.FAILED)
+        stopped = sum(1 for r in results if r.outcome == SendOutcome.STOPPED)
         self.prog_var.set(100)
         self.status_lbl.config(
-            text=f"완료 — 성공 {succeeded}, 실패 {failed}",
-            fg=COLORS["green"] if not failed else COLORS["red"],
+            text=f"완료 — 성공 {succeeded}, 실패 {failed}, 미발송 {stopped}",
+            fg=COLORS["green"] if not (failed or stopped) else COLORS["red"],
         )
-        if failed:
-            self.retry_btn.config(state="normal")
-        messagebox.showinfo("발송 완료", f"성공 {succeeded}명 / 실패 {failed}명")
+        self._update_retry_button()
+        summary = f"성공 {succeeded}명 / 실패 {failed}명 / 미발송 {stopped}명"
+        abort = next((r for r in results if r.aborts_batch), None)
+        if abort is not None:
+            messagebox.showwarning(
+                "발송 중단",
+                f"{summary}\n\n중단 사유: {abort.reason}\n\n"
+                "원인을 정리한 뒤 '실패·미발송 이어보내기' 로 남은 사람에게 보내세요.",
+            )
+        else:
+            messagebox.showinfo("발송 완료", summary)
 
     def _worker_failed(self, message: str) -> None:
         self.state.is_running = False
         self._set_running_ui(False)
         self.status_lbl.config(text=f"오류 — {message}", fg=COLORS["red"])
+        if not self.state.last_results:
+            # 카톡 창 못 찾음 등으로 아무것도 처리 못 함 — 직전 상태(남은 사람 목록) 복원
+            self.state.last_results, self.state.sent_before = self._prev_state
+        # 남은 사람은 이어보내기로 — 처음부터 다시 돌리면 중복 발송
+        self._update_retry_button()
         messagebox.showerror("발송 실패", message)
+
+    def _update_retry_button(self) -> None:
+        pending = retry_jobs(self.state.last_results or [])
+        self.retry_btn.config(state="normal" if pending else "disabled")
 
     def _set_running_ui(self, running: bool) -> None:
         if running:

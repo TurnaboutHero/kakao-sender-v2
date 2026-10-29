@@ -6,9 +6,57 @@ from pathlib import Path
 
 from kakao_sender.engine.detection import (
     estimate_image_upload_wait,
+    normalize_input_text,
+    pasted_text_present,
+    text_left_in_input,
     verify_target_title,
     wait_until,
 )
+
+PLACEHOLDER = "메시지 입력"
+
+# ── 입력창 텍스트 비교 ─────────────────────────
+
+
+def test_normalize_drops_whitespace_emoji_and_object_char() -> None:
+    assert normalize_input_text("생일 축하해요 🎂\r\n") == "생일축하해요"
+    assert normalize_input_text("🎂 생일￼ 축하해 🎉") == "생일축하해"
+    assert normalize_input_text("❤️ 사랑해") == "사랑해"  # BMP 기호 + variation selector
+
+
+def test_pasted_text_present_on_placeholder_box() -> None:
+    assert pasted_text_present("생일 축하해요 🎂", PLACEHOLDER, "생일 축하해요 🎂")
+
+
+def test_pasted_text_present_tolerates_richedit_newlines_and_emoji_objects() -> None:
+    assert pasted_text_present("첫 줄\n둘째 줄 🎉", PLACEHOLDER, "첫 줄\r둘째 줄 ￼")
+
+
+def test_pasted_text_missing_when_paste_went_elsewhere() -> None:
+    """붙여넣기가 다른 창으로 새면 입력창은 그대로 — Enter 를 누르면 안 됨."""
+    assert not pasted_text_present("생일 축하해요", PLACEHOLDER, PLACEHOLDER)
+    assert not pasted_text_present("생일 축하해요", "", "")
+
+
+def test_pasted_text_wrong_content_rejected() -> None:
+    assert not pasted_text_present("생일 축하해요", PLACEHOLDER, "다른 내용")
+
+
+def test_pasted_emoji_only_message_judged_by_change() -> None:
+    assert pasted_text_present("🎂🎉", PLACEHOLDER, "🎂🎉")
+    assert not pasted_text_present("🎂🎉", PLACEHOLDER, PLACEHOLDER)
+    # before 를 "" 로 읽었다가 placeholder 가 나타난 건 "내용 변화" 가 아님
+    assert not pasted_text_present("🎂🎉", "", PLACEHOLDER)
+
+
+def test_text_left_in_input() -> None:
+    assert text_left_in_input("생일 축하해요 🎂", "생일 축하해요 🎂")
+    assert text_left_in_input("첫 줄\n둘째 줄", "첫 줄\r둘째 줄")  # 원문 비교로는 놓치던 경우
+    assert not text_left_in_input("생일 축하해요", PLACEHOLDER)
+    assert not text_left_in_input("🎂", "🎂")  # 판정 불가 → 전송된 것으로 간주
+    # placeholder "메시지 입력" 의 일부인 짧은 메시지도 빈 입력창이면 전송된 것
+    assert not text_left_in_input("입력", PLACEHOLDER)
+
 
 # ── verify_target_title ────────────────────────
 

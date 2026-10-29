@@ -45,6 +45,8 @@ class Timing:
     after_ctrl_v_image: float = 0.4
     after_send_text: float = 0.6
     close_chat: float = 0.15
+    wait_paste_confirm: float = 1.0  # 붙여넣기가 입력창에 반영될 때까지 폴링 상한
+    wait_send_confirm: float = 1.5  # Enter 후 입력창이 비워질 때까지 폴링 상한
 
     # 조건 폴링 상한
     wait_chat_ready_timeout: float = 3.0
@@ -89,6 +91,8 @@ class UIANames:
     friends_tab_name: str = "친구"
     chats_tab_name: str = "채팅"
     search_edit_placeholders: tuple[str, ...] = ("검색", "이름, 전화번호", "친구 검색")
+    # 빈 채팅 입력창(RICHEDIT50W)이 WM_GETTEXT 로 돌려주는 placeholder (Phase 3-2 ④ 실측)
+    input_placeholder: str = "메시지 입력"
 
     # 메인 창 내부 뷰 이름 prefix (win32 GetWindowText startswith 매칭용).
     # 활성 여부는 GetWindowRect 의 너비·높이가 0 이 아닌지로 판정한다.

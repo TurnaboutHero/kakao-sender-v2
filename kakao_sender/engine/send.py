@@ -4,7 +4,8 @@
 - 오발송 방지: 채팅창 제목으로 대상 이름 검증, 불일치 시 즉시 실패
 - 스팸 회피: 발송 간격 랜덤, N명마다 휴식, 문구 변주
 - 중단 가능: `SendController.stop()` 즉시 반영
-- 결과 추적: 성공/실패/스킵 분류, 실패 사유 수집, 재시도용 실패자 목록 추출
+- 결과 추적: 성공/실패/중단 분류, 실패 사유 수집. 중단되면 남은 사람도 전부 STOPPED 로
+  기록해 `retry_failed` 로 이어보낼 수 있게 한다 (이미 받은 사람에게는 다시 보내지 않음)
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from __future__ import annotations
 import random
 import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from threading import Event
@@ -21,6 +22,7 @@ from kakao_sender import config, logging_setup
 from kakao_sender.engine.kakao import (
     KakaoClient,
     KakaoError,
+    KakaoFocusError,
     KakaoTabError,
     KakaoTargetMismatchError,
 )
@@ -60,6 +62,12 @@ class SendResult:
     reason: str = ""
     duration_sec: float = 0.0
     attempt: int = 1
+    image_sent: bool = False  # 실패했지만 이미지는 이미 나감 — 재시도 시 이미지 생략
+    aborts_batch: bool = False  # 탭·포커스 문제 — 다음 건도 같은 이유로 위험하므로 배치 중단
+
+    @property
+    def retryable(self) -> bool:
+        return self.outcome in (SendOutcome.FAILED, SendOutcome.STOPPED)
 
 
 @dataclass(slots=True)
@@ -86,49 +94,52 @@ def send_one(
     message_variants: Sequence[str] | None = None,
     attempt: int = 1,
 ) -> SendResult:
-    """한 사람에게 전송. 예외를 잡아 SendResult 로 반환.
+    """한 사람에게 전송. 예외를 잡아 SendResult 로 반환 (예외를 밖으로 던지지 않음).
 
     Phase 3 오발송 방지 파이프라인:
-    1. `switch_to_friend_tab()` — 채팅 탭의 단톡방 혼재 결과 제거
+    1. `require_friend_tab()` — 채팅 탭의 단톡방 혼재 결과 제거 (확인만)
     2. `search(target_name)`
     3. `open_friend_chat(target_name)` — HWND diff + 제목 완전일치 내부 검증
-    4. 이미지/텍스트 전송 (RichEdit 직접 주입)
-    5. `close_current_chat()` — 대상 HWND 만 닫음
+    4. 이미지/텍스트 전송 (클립보드 + Ctrl+V, 입력 직전마다 맨 앞 창 확인)
+    5. `close_current_chat()` — 대상 HWND 만 닫음. 전송 중 실패해도 닫는다.
+
+    탭·포커스 오류는 `aborts_batch=True` 로 표시해 호출자가 배치를 멈추게 한다.
     """
     t0 = time.monotonic()
+    image_sent = False
+
+    def result(outcome: SendOutcome, reason: str = "", *, aborts: bool = False) -> SendResult:
+        return SendResult(job, outcome, reason, time.monotonic() - t0, attempt, image_sent, aborts)
+
     try:
-        client.switch_to_friend_tab()
+        client.require_friend_tab()
         client.search(job.target_name)
         client.open_friend_chat(job.target_name)
+        try:
+            if job.image_path is not None:
+                client.send_image(job.image_path)
+                image_sent = True
 
-        if job.image_path is not None:
-            client.send_image(job.image_path)
-
-        if job.text:
-            text_to_send = _pick_text(job.text, message_variants)
-            client.send_text(text_to_send)
-
-        client.close_current_chat()
-        return SendResult(job, SendOutcome.SUCCESS, "", time.monotonic() - t0, attempt)
+            if job.text:
+                text_to_send = _pick_text(job.text, message_variants)
+                client.send_text(text_to_send)
+        finally:
+            client.close_current_chat()
+        return result(SendOutcome.SUCCESS)
 
     except KakaoTargetMismatchError as e:
         # 제목 불일치 — open_friend_chat 내부에서 이미 WM_CLOSE 전송 완료
         _log.warning("대상 검증 실패: %s", e)
-        return SendResult(
-            job, SendOutcome.FAILED, f"대상 검증 실패: {e}", time.monotonic() - t0, attempt
-        )
-    except KakaoTabError:
-        # 친구 탭 전환 실패 — 전체 배치에 영향, 호출자가 판단하도록 재전달
-        raise
+        return result(SendOutcome.FAILED, f"대상 검증 실패: {e}")
+    except (KakaoTabError, KakaoFocusError) as e:
+        # 사용자가 탭을 바꿨거나 다른 창을 잡음 — 계속하면 엉뚱한 곳에 입력될 수 있음
+        _log.error("배치 중단 사유: %s", e)
+        return result(SendOutcome.FAILED, f"{type(e).__name__}: {e}", aborts=True)
     except KakaoError as e:
-        return SendResult(
-            job, SendOutcome.FAILED, f"KakaoError: {e}", time.monotonic() - t0, attempt
-        )
+        return result(SendOutcome.FAILED, f"KakaoError: {e}")
     except Exception as e:  # 예기치 못한 예외도 배치 중단 없이 수집
         _log.exception("send_one 예외")
-        return SendResult(
-            job, SendOutcome.FAILED, f"{type(e).__name__}: {e}", time.monotonic() - t0, attempt
-        )
+        return result(SendOutcome.FAILED, f"{type(e).__name__}: {e}")
 
 
 def send_batch(
@@ -141,38 +152,40 @@ def send_batch(
     rate: config.Timing | None = None,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> list[SendResult]:
-    """명단 전체를 순회하며 발송.
+    """명단 전체를 순회하며 발송. 모든 job 에 대해 정확히 하나의 결과를 반환한다.
 
     - 각 발송 후 `on_result(result)` 콜백 호출 (UI 업데이트용)
-    - `controller.stop()`이 걸리면 현재 건 완료 후 중단
+    - `controller.stop()`이 걸리면 현재 건 완료 후 중단, 남은 job 은 STOPPED
+    - `aborts_batch` 결과가 나오면 즉시 중단, 남은 job 은 STOPPED
     - 간격 랜덤 + N명마다 휴식으로 스팸 필터 회피
     """
     ctrl = controller or SendController()
     rate = rate or config.TIMING
     results: list[SendResult] = []
 
+    def record(result: SendResult) -> None:
+        results.append(result)
+        if on_result:
+            on_result(result)
+
+    def stop_remaining(remaining: Sequence[SendJob], reason: str) -> None:
+        for job in remaining:
+            record(SendResult(job, SendOutcome.STOPPED, reason))
+
     _log.info("배치 발송 시작: %d명", len(jobs))
-    # 배치 시작 시 친구 탭 강제 — 첫 건에서 단톡방 결과가 섞이는 것을 막는다.
-    # (각 건마다 send_one 내부에서도 한 번 더 호출되나 방어 과다는 무해)
+    # 배치 시작 시 친구 탭 확인 — 첫 건에서 단톡방 결과가 섞이는 것을 막는다.
     try:
-        client.switch_to_friend_tab()
+        client.require_friend_tab()
     except KakaoTabError as e:
-        _log.error("배치 시작 직후 친구 탭 전환 실패 — 전체 중단: %s", e)
-        # 전환 실패는 전체 배치를 망치므로 모든 job 을 STOPPED 로 기록하고 반환
-        for job in jobs:
-            results.append(SendResult(job, SendOutcome.STOPPED, f"친구 탭 전환 실패: {e}"))
-            if on_result:
-                on_result(results[-1])
+        _log.error("배치 시작 시 친구 탭 아님 — 전체 중단: %s", e)
+        stop_remaining(jobs, f"친구 탭 아님: {e}")
         return results
-    # open_search 는 search() 가 내부에서 매번 Ctrl+F 를 호출하므로 별도 선행 불필요
 
     try:
         for idx, job in enumerate(jobs, 1):
             if ctrl.stopped:
                 _log.info("사용자 중단 요청 감지")
-                results.append(SendResult(job, SendOutcome.STOPPED, "사용자 중단"))
-                if on_result:
-                    on_result(results[-1])
+                stop_remaining(jobs[idx - 1 :], "사용자 중단")
                 break
 
             _log.info(
@@ -183,19 +196,49 @@ def send_batch(
                 job.target_name,
             )
             result = send_one(client, job, message_variants=message_variants)
-            results.append(result)
-            if on_result:
-                on_result(result)
+            record(result)
+
+            if result.aborts_batch:
+                _log.error("배치 중단 — 남은 %d명은 미발송", len(jobs) - idx)
+                stop_remaining(jobs[idx:], f"배치 중단 ({result.reason})")
+                break
 
             if idx < len(jobs):
                 _pace(idx, rate, sleeper, ctrl)
     finally:
-        client.close_search()
+        # 포커스를 잃은 상태면 close_search 도 실패한다 — 결과를 잃지 않도록 삼킨다.
+        try:
+            client.close_search()
+        except KakaoError as e:
+            _log.warning("검색창 닫기 실패 (무시): %s", e)
 
-    succeeded = sum(1 for r in results if r.outcome == SendOutcome.SUCCESS)
-    failed = sum(1 for r in results if r.outcome == SendOutcome.FAILED)
-    _log.info("배치 완료: 성공 %d, 실패 %d, 총 %d", succeeded, failed, len(results))
+    counts = {o: sum(1 for r in results if r.outcome == o) for o in SendOutcome}
+    _log.info(
+        "배치 완료: 성공 %d, 실패 %d, 중단 %d, 총 %d",
+        counts[SendOutcome.SUCCESS],
+        counts[SendOutcome.FAILED],
+        counts[SendOutcome.STOPPED],
+        len(results),
+    )
     return results
+
+
+def retry_jobs(results: Iterable[SendResult]) -> list[SendJob]:
+    """이어보낼 job 목록 — 실패(FAILED)와 미발송(STOPPED)만. 성공한 사람은 제외.
+
+    이미지는 나가고 텍스트만 실패한 건은 이미지를 빼고 텍스트만 다시 보낸다.
+    """
+    jobs: list[SendJob] = []
+    for r in results:
+        if not r.retryable:
+            continue
+        job = r.job
+        if r.image_sent:
+            if not job.text:
+                continue
+            job = replace(job, image_path=None)
+        jobs.append(job)
+    return jobs
 
 
 def retry_failed(
@@ -203,13 +246,13 @@ def retry_failed(
     prior_results: Iterable[SendResult],
     **kwargs,
 ) -> list[SendResult]:
-    """직전 배치의 실패자만 다시 발송."""
-    failed_jobs = [r.job for r in prior_results if r.outcome == SendOutcome.FAILED]
-    if not failed_jobs:
-        _log.info("재시도할 실패자 없음")
+    """직전 배치의 실패·미발송자만 다시 발송."""
+    jobs = retry_jobs(prior_results)
+    if not jobs:
+        _log.info("이어보낼 대상 없음")
         return []
-    _log.info("실패자 %d명 재시도", len(failed_jobs))
-    return send_batch(client, failed_jobs, **kwargs)
+    _log.info("실패·미발송 %d명 이어보내기", len(jobs))
+    return send_batch(client, jobs, **kwargs)
 
 
 def _pick_text(base: str, variants: Sequence[str] | None) -> str:
