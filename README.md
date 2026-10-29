@@ -1,6 +1,6 @@
 # kakao-sender (v2)
 
-카카오톡 PC 버전을 UI Automation으로 제어해 다수의 친구에게 개인톡을 순차 발송하는 데스크톱 도구. 동아리 생일 축하 메시지 같은 "단톡에 공개할 수 없는 대량 개인톡" 용도.
+카카오톡 PC 버전을 win32 창 핸들(HWND)과 클립보드·키 입력으로 제어해 다수의 친구에게 개인톡을 순차 발송하는 데스크톱 도구. 동아리 생일 축하 메시지 같은 "단톡에 공개할 수 없는 대량 개인톡" 용도.
 
 ## 이 저장소가 존재하는 이유
 
@@ -18,8 +18,8 @@
 
 | 항목 | 선택 | 근거 |
 | --- | --- | --- |
-| 상태 감지 | `uiautomation` (UIA) 우선 + 픽셀 fallback | 다크모드/DPI/버전 업데이트에 강함 |
-| 대상 검증 | 채팅창 제목과 목표 이름 비교 | 단톡방/동명이인 오발송 0 |
+| 창 제어·감지 | win32 HWND (`EnumWindows`/`EnumChildWindows`) + 클립보드·`Ctrl+V` | 카톡 UIA 트리는 비어 있어 쓸 수 없음 (Phase 2 실측) |
+| 대상 검증 | 친구 탭 확인 + HWND 스냅샷 diff + 제목 완전일치, 키 입력 직전 맨 앞 창 확인 | 단톡방/동명이인/엉뚱한 창 오발송 차단 |
 | 명단 | CSV 원본 + JSON 매핑 | 담당자별 카톡 저장명 변형 수용 |
 | 스팸 회피 | 간격 랜덤 + 주기 휴식 + 문구 변주 | 161명 규모 계정 차단 예방 |
 | 구조 | 패키지 분리 (app/engine/roster/config) | 테스트·재사용 가능 |
@@ -44,7 +44,10 @@ uv run ruff format --check
 # 앱 실행
 uv run python -m kakao_sender
 
-# 카톡 UIA 트리 조사 (Phase 2: 실측)
+# 실기기 dry-run (기본은 발송 안 함, --send 를 붙여야 실제 발송)
+uv run python scripts/dryrun.py --list
+
+# 카톡 창 구조 조사 (uiautomation 은 dev 의존성에만 포함)
 uv run python scripts/investigate.py
 ```
 
@@ -57,14 +60,18 @@ kakao_sender/
 ├── config.py             타이밍·문구·경로 상수
 ├── logging_setup.py      표준 logging 구성
 ├── engine/               카톡 조작 계층
-│   ├── kakao.py          UIA 기반 primitive
-│   ├── detection.py      상태 감지 (UIA + 시간 기반 fallback)
-│   └── send.py           오케스트레이션 (send_one, send_batch)
+│   ├── kakao.py          카톡 조작 primitive (검색·채팅창 열기·전송)
+│   ├── windows.py        win32 HWND 탐색 (채팅창 스냅샷, 활성 탭 판정)
+│   ├── detection.py      상태 판정 순수 함수 (제목 검증, 입력창 텍스트 비교)
+│   └── send.py           오케스트레이션 (send_one, send_batch, 이어보내기)
 └── roster/               명단 계층
     ├── store.py          CSV 로드/저장
     └── mapping.py        정식명 ↔ 카톡 저장명
 
-scripts/investigate.py    카톡 창 UIA 트리 덤프 (조사용)
+scripts/
+├── dryrun.py             UI 없이 발송 파이프라인만 실행 (실기기 검증용)
+├── migrate.py            원본 members.json → members.csv 변환
+└── investigate.py        카톡 창 구조 덤프 (조사용)
 tests/                    pytest 단위 테스트
 docs/                     설계·분석 문서
 ```
@@ -85,7 +92,7 @@ docs/                     설계·분석 문서
 - **Phase 2 (2026-04-23)**: 카톡 메인 창 UIA 가 빈 `PaneControl` 중첩뿐. 탭 버튼·검색창·친구 목록 모두 자체 렌더링.
 - **Phase 3 (2026-04-24)**: win32 `EnumChildWindows` 경로 추가 조사. **채팅창 (1:1 / 단톡방) 은 별도 top-level HWND** 이며 내부에 표준 `RICHEDIT50W` 입력창과 메시지 `ListControl` 을 노출. 메인 창도 `ContactListView_*` / `ChatRoomListView_*` 등 자식 HWND 이름 + rect 로 활성 탭 판정 가능. 단톡방 참여자 패널도 별도 HWND (검색 `Edit` + 리스트).
 
-**결과**: D1 이 "UIA 우선" → "win32 HWND + 핫키" (Phase 2) → **"win32 HWND + `EnumChildWindows` 주력, UIA 는 보조"** (Phase 3) 로 갱신. 오발송 방지는 **3중 방어** (친구 탭 강제 + HWND 스냅샷 diff + 제목 완전일치) 로 강화. 텍스트 전송은 `SendMessage(WM_SETTEXT)` 로 클립보드·포커스 독립. 상세 내역은 [`docs/investigation.md`](docs/investigation.md).
+**결과**: D1 이 "UIA 우선" → "win32 HWND + 핫키" (Phase 2) → **"win32 HWND + `EnumChildWindows` 주력, UIA 는 보조"** (Phase 3) 로 갱신. 오발송 방지는 **3중 방어** (친구 탭 강제 + HWND 스냅샷 diff + 제목 완전일치) 로 강화. 텍스트 전송은 `WM_SETTEXT` 가 카톡 반자동화 감지에 걸려 클립보드 + `Ctrl+V` + `Enter` 를 쓰고, 키 입력 직전마다 대상 창이 맨 앞인지 확인한다. 상세 내역은 [`docs/investigation.md`](docs/investigation.md).
 
 ## 라이선스
 

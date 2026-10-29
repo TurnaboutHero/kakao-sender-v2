@@ -60,7 +60,7 @@ UIA 는 **입력창 `AutomationId='1006'`** 발견 등 보조 경로로 존재�
 
 v2 의 **존재 이유**. 아래 3층 모두 통과해야 실제 발송:
 
-1. **친구 탭 강제** — `switch_to_friend_tab()` 후 `get_active_main_tab(main_hwnd)` 로 visibility 검증. 실패 시 즉시 예외. 채팅 탭 검색은 단톡방/1:1/친구 혼재 결과를 내므로 금지.
+1. **친구 탭 확인** — `require_friend_tab()` 이 `get_active_main_tab(main_hwnd)` 로 활성 탭을 판정. 자동 전환은 하지 않고 친구 탭이 아니면 즉시 예외 (사용자가 직접 전환). 채팅 탭 검색은 단톡방/1:1/친구 혼재 결과를 내므로 금지.
 2. **HWND 스냅샷 diff** — 검색 + Enter + Alt+Enter 전후의 `EVA_Window_Dblclk` 집합 차이로 새 채팅창 HWND 를 식별. 포커스가 다른 창으로 가도 타겟 특정 가능.
 3. **제목 완전일치** — `detection.verify_target_title` 은 `a.strip() == e.strip()` 만 성공. 부분일치 금지 — 단톡방 제목이 회원 이름을 포함할 수 있어 오발송 위험.
 

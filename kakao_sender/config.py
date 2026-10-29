@@ -1,16 +1,15 @@
 """타이밍·경로·기본 상수 한 곳 모음.
 
 원본 코드가 `time.sleep(0.1)`, 픽셀 좌표 등을 함수 본문에 흩뿌려놔서 튜닝이 어려웠음.
-상수는 전부 여기로 모으고 필요 시 환경변수로 override.
+상수는 전부 여기로 모아 한 곳에서 튜닝한다.
 
 모든 시간 단위는 초(seconds). 모든 경로는 `pathlib.Path`.
 """
 
 from __future__ import annotations
 
-import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -49,10 +48,8 @@ class Timing:
     wait_send_confirm: float = 1.5  # Enter 후 입력창이 비워질 때까지 폴링 상한
 
     # 조건 폴링 상한
-    wait_chat_ready_timeout: float = 3.0
     wait_image_upload_extra: float = 1.5
     wait_image_per_mb: float = 2.5  # 1MB 당 대기
-    wait_search_result_timeout: float = 1.5
 
     # Phase 3 신설 — HWND 스냅샷 diff / 탭 전환 검증
     wait_new_chat_window: float = 2.0
@@ -124,25 +121,3 @@ def ensure_dirs() -> None:
     """런타임 디렉토리가 존재하는지 보장."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def override_from_env() -> dict[str, str]:
-    """`KAKAO_SENDER_*` 환경변수로 경로 override. 발견된 키만 반환."""
-    overrides: dict[str, str] = {}
-    for name in ("DATA_DIR", "LOGS_DIR"):
-        key = f"KAKAO_SENDER_{name}"
-        if key in os.environ:
-            overrides[name] = os.environ[key]
-    return overrides
-
-
-@dataclass(frozen=True)
-class _Frozen:
-    """외부에서 상수 튜닝이 필요할 때 쓰는 스냅샷 헬퍼."""
-
-    timing: Timing = field(default_factory=Timing)
-    ui: UIANames = field(default_factory=UIANames)
-    msg: MessageVariants = field(default_factory=MessageVariants)
-
-
-DEFAULTS = _Frozen()

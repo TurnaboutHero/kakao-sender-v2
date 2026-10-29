@@ -1,7 +1,7 @@
 [project]
 name = "kakao-sender"
 version = "0.1.0"
-description = "카카오톡 PC 자동 개인톡 발송기 (win32 HWND + UIA 보조 리팩토링판)"
+description = "카카오톡 PC 자동 개인톡 발송기 (win32 HWND 기반 리팩토링판)"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 license = { text = "Proprietary" }
@@ -11,7 +11,6 @@ dependencies = [
     "pywin32>=308",
     "pyautogui>=0.9.54",
     "Pillow>=11.0.0",
-    "uiautomation>=2.0.20",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +31,7 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "ruff>=0.8",
+    "uiautomation>=2.0.20",  # scripts/investigate.py 전용 (앱 런타임은 안 씀)
 ]
 
 [tool.ruff]

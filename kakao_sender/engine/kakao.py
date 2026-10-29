@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 
 import pyautogui
-import win32api
 import win32clipboard
 import win32con
 import win32gui
@@ -146,16 +145,7 @@ class KakaoClient:
             "카톡 사이드바에서 '친구' 탭 아이콘을 클릭한 뒤 다시 시도해 주세요."
         )
 
-    # 하위 호환을 위한 별칭 (이전 이름을 외부에서 쓰고 있을 수 있음)
-    switch_to_friend_tab = require_friend_tab
-
     # ── 검색 ─────────────────────────────────────
-
-    def open_search(self) -> None:
-        """Ctrl+F 로 검색창 열기 (이미 열려있어도 무해)."""
-        self.focus_main()
-        pyautogui.hotkey("ctrl", "f")
-        time.sleep(config.TIMING.after_enter)
 
     def close_search(self) -> None:
         self.focus_main()
@@ -526,13 +516,6 @@ def _clear_edit(hwnd: int) -> None:
         win32gui.SendMessage(hwnd, win32con.WM_SETTEXT, 0, "")
     except Exception as e:
         _log.debug('WM_SETTEXT "" 실패: %s', e)
-
-
-def _post_key(hwnd: int, vk: int) -> None:
-    """특정 HWND 에 KEYDOWN/KEYUP 쌍을 Post. 캐릭터 키가 아닌 제어 키용."""
-    win32api.PostMessage(hwnd, win32con.WM_KEYDOWN, vk, 0)
-    time.sleep(0.02)
-    win32api.PostMessage(hwnd, win32con.WM_KEYUP, vk, 0)
 
 
 def _get_richedit_text(hwnd: int) -> str:

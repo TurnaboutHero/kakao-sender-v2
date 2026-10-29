@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.14"
 
 [[package]]
@@ -99,9 +99,7 @@ source = { editable = "." }
 dependencies = [
     { name = "pillow" },
     { name = "pyautogui" },
-    { name = "pyperclip" },
     { name = "pywin32" },
-    { name = "uiautomation" },
 ]
 
 [package.optional-dependencies]
@@ -114,6 +112,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "uiautomation" },
 ]
 
 [package.metadata]
@@ -121,9 +120,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=11.0.0" },
     { name = "pyautogui", specifier = ">=0.9.54" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.11" },
-    { name = "pyperclip", specifier = ">=1.9.0" },
     { name = "pywin32", specifier = ">=308" },
-    { name = "uiautomation", specifier = ">=2.0.20" },
 ]
 provides-extras = ["build"]
 
@@ -132,6 +129,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "uiautomation", specifier = ">=2.0.20" },
 ]
 
 [[package]]
