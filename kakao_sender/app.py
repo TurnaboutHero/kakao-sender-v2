@@ -14,7 +14,7 @@ import tkinter as tk
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import ClassVar
 
 from kakao_sender import config, logging_setup
@@ -37,7 +37,11 @@ from kakao_sender.roster import (
     save_mapping,
     save_members,
 )
-from kakao_sender.roster.store import sorted_by_name
+from kakao_sender.roster.store import (
+    normalize_birthday,
+    normalize_phone_last4,
+    sorted_by_name,
+)
 
 _log = logging_setup.get_logger(__name__)
 
@@ -145,21 +149,23 @@ class MembersTab(tk.Frame):
         _btn(bar, "💾 저장", self._save, "green_bg", "green").pack(side="right")
 
         # Treeview
-        cols = ("name", "group", "birthday", "phone_last4", "active")
+        cols = ("name", "group", "birthday", "phone_last4", "active", "note")
         frame = tk.Frame(self, bg=COLORS["border"], padx=1, pady=1)
         frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
         self.tree.heading("name", text="이름")
-        self.tree.heading("group", text="요회")
+        self.tree.heading("group", text="그룹")
         self.tree.heading("birthday", text="생일")
         self.tree.heading("phone_last4", text="연락처 끝4")
         self.tree.heading("active", text="활성")
+        self.tree.heading("note", text="메모")
         self.tree.column("name", width=130, anchor="w")
-        self.tree.column("group", width=80, anchor="w")
-        self.tree.column("birthday", width=70, anchor="center")
-        self.tree.column("phone_last4", width=90, anchor="center")
-        self.tree.column("active", width=60, anchor="center")
+        self.tree.column("group", width=90, anchor="w")
+        self.tree.column("birthday", width=90, anchor="center")
+        self.tree.column("phone_last4", width=80, anchor="center")
+        self.tree.column("active", width=50, anchor="center")
+        self.tree.column("note", width=140, anchor="w")
         self.tree.pack(side="left", fill="both", expand=True)
 
         sb = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -177,7 +183,14 @@ class MembersTab(tk.Frame):
                 "",
                 "end",
                 iid=m.id,
-                values=(m.name, m.group, m.birthday, m.phone_last4, "✓" if m.active else "—"),
+                values=(
+                    m.name,
+                    m.group,
+                    m.birthday,
+                    m.phone_last4,
+                    "✓" if m.active else "—",
+                    m.note,
+                ),
             )
         active_cnt = sum(1 for m in self.app.members if m.active)
         self.count_lbl.config(
@@ -192,55 +205,97 @@ class MembersTab(tk.Frame):
         return sel[0] if sel else None
 
     def _add_member(self) -> None:
-        name = simpledialog.askstring("회원 추가", "이름:", parent=self.app.root)
-        if not name:
-            return
-        name = name.strip()
-        if any(m.name == name for m in self.app.members):
-            messagebox.showwarning("중복", f"'{name}'은 이미 등록됨.")
-            return
-        group = (
-            simpledialog.askstring("회원 추가", "요회/캠퍼스 (선택):", parent=self.app.root) or ""
-        )
-        birthday = (
-            simpledialog.askstring(
-                "회원 추가", "생일 (MM-DD 또는 YYYY-MM-DD, 선택):", parent=self.app.root
-            )
-            or ""
-        )
-        self.app.members.append(Member(name=name, group=group, birthday=birthday))
-        self.refresh()
+        self._member_form(None)
 
     def _edit_member(self) -> None:
         mid = self._selected_id()
         if not mid:
             return
         m = next((x for x in self.app.members if x.id == mid), None)
-        if m is None:
-            return
-        new_name = simpledialog.askstring(
-            "이름 수정", "이름:", initialvalue=m.name, parent=self.app.root
+        if m is not None:
+            self._member_form(m)
+
+    def _member_form(self, member: Member | None) -> None:
+        """회원 추가/수정 양식 한 장. 이름만 필수, 나머지는 비워도 됨."""
+        dialog = tk.Toplevel(self.app.root)
+        dialog.title("회원 수정" if member else "회원 추가")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.resizable(False, False)
+        dialog.transient(self.app.root)
+
+        form = tk.Frame(dialog, bg=COLORS["bg"])
+        form.pack(fill="both", padx=14, pady=(14, 6))
+
+        fields = (
+            ("name", "이름 *", member.name if member else "", ""),
+            ("group", "그룹", member.group if member else "", "기수·팀·캠퍼스 등 자유롭게"),
+            ("birthday", "생일", member.birthday if member else "", "03-15 또는 1999-03-15"),
+            ("phone_last4", "연락처 끝4", member.phone_last4 if member else "", "동명이인 구분용"),
+            ("note", "메모", member.note if member else "", ""),
         )
-        if new_name is None:
-            return
-        new_name = new_name.strip()
-        if not new_name:
-            messagebox.showwarning("오류", "이름은 비울 수 없음.")
-            return
-        new_group = (
-            simpledialog.askstring("요회 수정", "요회:", initialvalue=m.group, parent=self.app.root)
-            or ""
-        )
-        new_birthday = (
-            simpledialog.askstring(
-                "생일 수정", "생일 (MM-DD):", initialvalue=m.birthday, parent=self.app.root
+        vars_: dict[str, tk.StringVar] = {}
+        for row, (key, label, value, hint) in enumerate(fields):
+            tk.Label(form, text=label, font=F(10), bg=COLORS["bg"], fg=COLORS["txt"]).grid(
+                row=row, column=0, sticky="w", pady=3
             )
-            or ""
-        )
-        m.name = new_name
-        m.group = new_group
-        m.birthday = new_birthday
-        self.refresh()
+            vars_[key] = tk.StringVar(value=value)
+            entry = tk.Entry(form, textvariable=vars_[key], font=F(10), width=24)
+            entry.grid(row=row, column=1, sticky="we", padx=(8, 8), pady=3)
+            if key == "name":
+                entry.focus_set()
+            tk.Label(form, text=hint, font=F(8), bg=COLORS["bg"], fg=COLORS["sub"]).grid(
+                row=row, column=2, sticky="w"
+            )
+        active_var = tk.BooleanVar(value=member.active if member else True)
+        tk.Checkbutton(
+            form,
+            text="활성 (발송 대상에 포함)",
+            variable=active_var,
+            font=F(10),
+            bg=COLORS["bg"],
+            activebackground=COLORS["bg"],
+        ).grid(row=len(fields), column=1, sticky="w", pady=(6, 0))
+        tk.Label(
+            form, text="* 표시만 필수입니다.", font=F(8), bg=COLORS["bg"], fg=COLORS["sub"]
+        ).grid(row=len(fields) + 1, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        def save() -> None:
+            name = vars_["name"].get().strip()
+            if not name:
+                messagebox.showwarning("오류", "이름은 비울 수 없음.", parent=dialog)
+                return
+            if any(m.name == name and m is not member for m in self.app.members):
+                messagebox.showwarning("중복", f"'{name}'은 이미 등록됨.", parent=dialog)
+                return
+            try:
+                birthday = normalize_birthday(vars_["birthday"].get())
+                phone_last4 = normalize_phone_last4(vars_["phone_last4"].get())
+            except ValueError as e:
+                messagebox.showwarning("입력 오류", str(e), parent=dialog)
+                return
+            values = {
+                "name": name,
+                "group": vars_["group"].get().strip(),
+                "birthday": birthday,
+                "phone_last4": phone_last4,
+                "note": vars_["note"].get().strip(),
+                "active": active_var.get(),
+            }
+            if member is None:
+                self.app.members.append(Member(**values))
+            else:
+                for key, value in values.items():
+                    setattr(member, key, value)
+            self.refresh()
+            dialog.destroy()
+
+        btn = tk.Frame(dialog, bg=COLORS["bg"])
+        btn.pack(fill="x", padx=14, pady=(4, 12))
+        _btn(btn, "확인", save, "yellow").pack(side="right")
+        _btn(btn, "취소", dialog.destroy, "red_bg", "red").pack(side="right", padx=(0, 4))
+        dialog.bind("<Return>", lambda _e: save())
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.grab_set()
 
     def _delete_member(self) -> None:
         ids = list(self.tree.selection())
@@ -350,7 +405,7 @@ class MappingTab(tk.Frame):
             rowframe = tk.Frame(self._inner, bg=COLORS["white"])
             rowframe.pack(fill="x", padx=8, pady=2)
 
-            # 정식명 + 요회
+            # 정식명 + 그룹
             label_text = f"  {m.name}" + (f"  ({m.group})" if m.group else "")
             tk.Label(
                 rowframe,

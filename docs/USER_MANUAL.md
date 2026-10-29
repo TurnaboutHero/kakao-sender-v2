@@ -40,6 +40,8 @@ uv run python scripts/migrate.py path/to/members.json
 uv run python -m kakao_sender
 ```
 "👥 명단" 탭에서 ➕ 추가로 한 명씩, 또는 "📂 legacy .json 불러오기" 로 import.
+추가·수정 양식에서 **이름만 필수**이고 그룹(기수·팀 등)·생일·연락처 끝4·메모는 비워도 된다.
+생일은 `03-15`, `3/15`, `1999.03.15` 처럼 입력해도 `MM-DD` / `YYYY-MM-DD` 로 정리된다.
 
 ### 3-3. 매핑 (가장 중요)
 
