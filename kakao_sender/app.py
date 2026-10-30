@@ -37,6 +37,12 @@ from kakao_sender.roster import (
     save_mapping,
     save_members,
 )
+from kakao_sender.roster.selection import (
+    TargetScope,
+    TargetSelection,
+    active_groups,
+    select_targets,
+)
 from kakao_sender.roster.store import (
     normalize_birthday,
     normalize_phone_last4,
@@ -520,6 +526,9 @@ class SendTab(tk.Frame):
         self.image_var = tk.StringVar()
         self.use_variants_var = tk.BooleanVar(value=False)
         self.excluded_ids: set[str] = set()
+        self.selected_ids: set[str] = set()
+        self.scope_var = tk.StringVar(value=TargetScope.ALL)
+        self.group_var = tk.StringVar()
         self._total_planned = 1
         self._prev_state: tuple[list[SendResult], list[SendResult]] = ([], [])
         self._build()
@@ -596,9 +605,35 @@ class SendTab(tk.Frame):
             bg=COLORS["bg"],
             fg=COLORS["sub"],
         ).pack(side="left")
-        _btn(target_frame, "🚫 생일자 제외 설정", self._exclude_dialog, "blue_bg", "blue").pack(
+        _btn(target_frame, "🚫 제외 설정", self._exclude_dialog, "blue_bg", "blue").pack(
             side="right"
         )
+
+        scope_row = tk.Frame(self, bg=COLORS["bg"])
+        scope_row.pack(fill="x", padx=14, pady=(0, 4))
+
+        def scope_radio(text: str, value: TargetScope) -> None:
+            tk.Radiobutton(
+                scope_row,
+                text=text,
+                value=value,
+                variable=self.scope_var,
+                command=self.refresh_targets,
+                font=F(9),
+                bg=COLORS["bg"],
+                activebackground=COLORS["bg"],
+            ).pack(side="left")
+
+        scope_radio("전체", TargetScope.ALL)
+        scope_radio("그룹:", TargetScope.GROUP)
+        self.group_combo = ttk.Combobox(
+            scope_row, textvariable=self.group_var, state="readonly", width=12, font=F(9)
+        )
+        self.group_combo.pack(side="left", padx=(0, 10))
+        self.group_combo.bind("<<ComboboxSelected>>", self._on_group_picked)
+        scope_radio("선택한 사람만", TargetScope.SELECTED)
+        self.select_btn = _btn(scope_row, "👤 대상 고르기", self._select_dialog, "blue_bg", "blue")
+        self.select_btn.pack(side="left", padx=(2, 0))
 
         self.target_summary = tk.Label(self, text="", font=F(9), bg=COLORS["bg"], fg=COLORS["txt"])
         self.target_summary.pack(fill="x", padx=14, pady=(0, 4))
@@ -631,25 +666,41 @@ class SendTab(tk.Frame):
 
     # ── 대상 계산 ─────────────────────────────
 
-    def _eligible_jobs(self) -> tuple[list[SendJob], list[Member], list[Member]]:
+    def _selection(self) -> TargetSelection:
+        return select_targets(
+            self.app.members,
+            scope=TargetScope(self.scope_var.get()),
+            group=self.group_var.get(),
+            selected_ids=self.selected_ids,
+            excluded_ids=self.excluded_ids,
+        )
+
+    def _scope_label(self) -> str:
+        scope = TargetScope(self.scope_var.get())
+        if scope is TargetScope.GROUP:
+            return f"그룹 '{self.group_var.get()}'" if self.group_var.get() else "그룹 (미선택)"
+        if scope is TargetScope.SELECTED:
+            return f"선택한 {self._selected_count()}명"
+        return "전체"
+
+    def _selected_count(self) -> int:
+        """선택 목록 중 지금 명단에 있는 활성 회원 수 (삭제·비활성 회원은 안 셈)."""
+        return sum(1 for m in self.app.members if m.active and m.id in self.selected_ids)
+
+    def _eligible_jobs(self) -> tuple[list[SendJob], list[Member], TargetSelection]:
         """현재 상태에서 발송 가능한 jobs + 스킵 이유별 분류.
 
         반환:
-          eligible_jobs, skipped_no_map, skipped_excluded
+          eligible_jobs, skipped_no_map, selection (범위·제외 분류)
         """
         text = self.msg_text.get("1.0", "end").strip()
         image_path = Path(self.image_var.get()) if self.image_var.get().strip() else None
 
         jobs: list[SendJob] = []
         no_map: list[Member] = []
-        excluded: list[Member] = []
+        selection = self._selection()
 
-        for m in self.app.members:
-            if not m.active:
-                continue
-            if m.id in self.excluded_ids:
-                excluded.append(m)
-                continue
+        for m in selection.picked:
             entry = self.app.mapping.get(m.id)
             if entry is None or not entry.kakao_name:
                 no_map.append(m)
@@ -665,13 +716,29 @@ class SendTab(tk.Frame):
                     member_id=m.id,
                 )
             )
-        return jobs, no_map, excluded
+        return jobs, no_map, selection
 
     def refresh_targets(self) -> None:
-        jobs, no_map, excluded = self._eligible_jobs()
-        self.target_summary.config(
-            text=f"발송 {len(jobs)}명  |  미매핑 제외 {len(no_map)}명  |  제외 목록 {len(excluded)}명"
-        )
+        groups = active_groups(self.app.members)
+        self.group_combo.config(values=groups)
+        if self.group_var.get() and self.group_var.get() not in groups:
+            self.group_var.set("")  # 그룹 이름이 바뀌거나 사라짐
+        self.select_btn.config(text=f"👤 대상 고르기 ({self._selected_count()})")
+
+        jobs, no_map, sel = self._eligible_jobs()
+        parts = [
+            f"범위: {self._scope_label()}",
+            f"발송 {len(jobs)}명",
+            f"미매핑 제외 {len(no_map)}명",
+            f"제외 목록 {len(sel.excluded)}명",
+        ]
+        if sel.out_of_scope:
+            parts.append(f"범위 밖 {sel.out_of_scope}명")
+        self.target_summary.config(text="  |  ".join(parts))
+
+    def _on_group_picked(self, _event: object = None) -> None:
+        self.scope_var.set(TargetScope.GROUP)
+        self.refresh_targets()
 
     # ── 다이얼로그 ────────────────────────────
 
@@ -681,20 +748,63 @@ class SendTab(tk.Frame):
             self.image_var.set(p)
 
     def _exclude_dialog(self) -> None:
+        def apply(ids: set[str]) -> None:
+            self.excluded_ids = ids
+            self.refresh_targets()
+
+        self._member_checklist(
+            title="제외 대상 선택",
+            notice="체크한 사람은 어떤 범위로 보내든 이번 발송에서 빠집니다.\n"
+            "(예: 생일 축하를 받을 본인)",
+            initial=self.excluded_ids,
+            on_apply=apply,
+        )
+
+    def _select_dialog(self) -> None:
+        def apply(ids: set[str]) -> None:
+            self.selected_ids = ids
+            self.scope_var.set(TargetScope.SELECTED)
+            self.refresh_targets()
+
+        self._member_checklist(
+            title="발송 대상 고르기",
+            notice="체크한 사람에게만 보냅니다 ('선택한 사람만' 모드).\n"
+            "제외 목록에 있는 사람은 체크해도 빠집니다.",
+            initial=self.selected_ids,
+            on_apply=apply,
+        )
+
+    def _member_checklist(
+        self,
+        *,
+        title: str,
+        notice: str,
+        initial: set[str],
+        on_apply: Callable[[set[str]], None],
+    ) -> None:
+        """활성 회원 체크 목록 창. 이름·그룹 검색과 보이는 항목 일괄 체크 지원."""
         dialog = tk.Toplevel(self.app.root)
-        dialog.title("생일자 / 제외 대상 선택")
-        dialog.geometry("420x500")
+        dialog.title(title)
+        dialog.geometry("420x540")
         dialog.configure(bg=COLORS["bg"])
 
         tk.Label(
             dialog,
-            text="체크한 사람은 이번 발송에서 제외됩니다.\n(생일자 본인 실수 전송 방지)",
+            text=notice,
             font=F(9),
             bg=COLORS["warn_bg"],
             fg=COLORS["warn_txt"],
             padx=10,
             pady=6,
         ).pack(fill="x")
+
+        search_row = tk.Frame(dialog, bg=COLORS["bg"])
+        search_row.pack(fill="x", padx=10, pady=(8, 0))
+        tk.Label(search_row, text="🔍", font=F(9), bg=COLORS["bg"]).pack(side="left")
+        query_var = tk.StringVar()
+        tk.Entry(search_row, textvariable=query_var, font=F(9)).pack(
+            side="left", fill="x", expand=True, padx=(2, 4), ipady=2
+        )
 
         frame = tk.Frame(dialog, bg=COLORS["white"])
         frame.pack(fill="both", expand=True, padx=10, pady=8)
@@ -708,12 +818,13 @@ class SendTab(tk.Frame):
         inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
 
         vars_: dict[str, tk.BooleanVar] = {}
+        rows: list[tuple[Member, tk.Checkbutton]] = []
         for m in sorted_by_name(self.app.members):
             if not m.active:
                 continue
-            v = tk.BooleanVar(value=m.id in self.excluded_ids)
+            v = tk.BooleanVar(value=m.id in initial)
             vars_[m.id] = v
-            tk.Checkbutton(
+            cb = tk.Checkbutton(
                 inner,
                 text=f"{m.name}  ({m.group})" if m.group else m.name,
                 variable=v,
@@ -721,15 +832,50 @@ class SendTab(tk.Frame):
                 bg=COLORS["white"],
                 anchor="w",
                 activebackground=COLORS["white"],
-            ).pack(fill="x", padx=8, pady=1)
+            )
+            cb.pack(fill="x", padx=8, pady=1)
+            rows.append((m, cb))
+
+        def visible() -> list[Member]:
+            q = query_var.get().strip()
+            return [m for m, _ in rows if not q or q in m.name or q in m.group]
+
+        def apply_filter(*_args: object) -> None:
+            shown = {m.id for m in visible()}
+            for m, cb in rows:
+                cb.pack_forget()
+                if m.id in shown:
+                    cb.pack(fill="x", padx=8, pady=1)
+            canvas.yview_moveto(0)
+
+        def check_visible(value: bool) -> None:
+            for m in visible():
+                vars_[m.id].set(value)
+
+        query_var.trace_add("write", apply_filter)
+        _btn(search_row, "보이는 항목 체크", lambda: check_visible(True), "blue_bg", "blue").pack(
+            side="left"
+        )
+        _btn(search_row, "해제", lambda: check_visible(False), "red_bg", "red").pack(
+            side="left", padx=(4, 0)
+        )
+
+        count_lbl = tk.Label(dialog, text="", font=F(9), bg=COLORS["bg"], fg=COLORS["sub"])
+
+        def update_count(*_args: object) -> None:
+            count_lbl.config(text=f"체크 {sum(v.get() for v in vars_.values())}명")
+
+        for v in vars_.values():
+            v.trace_add("write", update_count)
+        update_count()
 
         def apply_and_close() -> None:
-            self.excluded_ids = {mid for mid, v in vars_.items() if v.get()}
-            self.refresh_targets()
+            on_apply({mid for mid, v in vars_.items() if v.get()})
             dialog.destroy()
 
         btn = tk.Frame(dialog, bg=COLORS["bg"])
         btn.pack(fill="x", padx=10, pady=8)
+        count_lbl.pack(in_=btn, side="left")
         _btn(btn, "확인", apply_and_close, "yellow").pack(side="right")
         _btn(btn, "취소", dialog.destroy, "red_bg", "red").pack(side="right", padx=(0, 4))
 
@@ -767,7 +913,7 @@ class SendTab(tk.Frame):
             return
         if not messagebox.askyesno(
             "발송 확인",
-            f"{len(jobs)}명에게 발송합니다.\n\n"
+            f"범위: {self._scope_label()}\n{len(jobs)}명에게 발송합니다.\n\n"
             "☑️ 카카오톡이 '친구' 탭에 있어야 합니다 (자동 전환 안 됨 — 아니면 중단)\n"
             "✅ 채팅창 제목이 카톡 저장명과 완전일치할 때만 발송\n"
             "✅ 붙여넣기·전송 직전마다 대상 채팅창이 맨 앞인지 확인\n\n"
